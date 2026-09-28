@@ -1,0 +1,20 @@
+root = true
+
+# 모든 파일 공통 기본값
+[*]
+charset = utf-8-bom
+end_of_line = crlf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# C++ / HLSL 소스 (탭 들여쓰기 유지)
+[*.{c,cpp,cc,cxx,h,hpp,hlsl,hlsli,inl}]
+charset = utf-8-bom
+indent_style = tab
+indent_size = 4
+
+# 프로젝트/설정 파일
+[*.{vcxproj,filters,props,targets,config,json,xml}]
+charset = utf-8-bom
+indent_style = space
+indent_size = 2
