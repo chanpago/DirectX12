@@ -7,9 +7,15 @@ end_of_line = crlf
 insert_final_newline = true
 trim_trailing_whitespace = true
 
-# C++ / HLSL 소스 (탭 들여쓰기 유지)
-[*.{c,cpp,cc,cxx,h,hpp,hlsl,hlsli,inl}]
+# C++ 소스 (탭 들여쓰기 유지)
+[*.{c,cpp,cc,cxx,h,hpp,inl}]
 charset = utf-8-bom
+indent_style = tab
+indent_size = 4
+
+# HLSL 소스 (FXC가 BOM을 인식하지 못하므로 BOM 없는 UTF-8)
+[*.{hlsl,hlsli}]
+charset = utf-8
 indent_style = tab
 indent_size = 4
 
