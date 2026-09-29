@@ -1,5 +1,6 @@
 ﻿// DirectX 12 + Dear ImGui 기초 렌더링 연습
-// - Win32 창 / D3D12 디바이스 / 스왑체인 / 프레임 동기화 / ImGui
+// - Win32 창 / D3D12 디바이스 / 스왑체인 / 프레임 동기화
+// - ImGui는 ImGuiLayer로 분리
 // - 렌더링 파이프라인(루트 시그니처, 셰이더, PSO, 버텍스 버퍼, 드로우)은 직접 작성
 
 #define WIN32_LEAN_AND_MEAN
@@ -15,9 +16,7 @@
 #include <cstdio>
 #include <stdexcept>
 
-#include "imgui.h"
-#include "imgui_impl_win32.h"
-#include "imgui_impl_dx12.h"
+#include "ImGuiLayer.h"
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -27,15 +26,13 @@
 
 using Microsoft::WRL::ComPtr;
 
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-
 // ---------------------------------------------------------------------------
 // 설정 상수
 // ---------------------------------------------------------------------------
 static constexpr UINT        kNumFramesInFlight = 2;
 static constexpr UINT        kNumBackBuffers    = 3;
-static constexpr UINT        kSrvHeapSize       = 64;
 static constexpr DXGI_FORMAT kBackBufferFormat  = DXGI_FORMAT_R8G8B8A8_UNORM;
+static constexpr wchar_t     kWindowClassName[] = L"DirectX12Sample";
 
 // ---------------------------------------------------------------------------
 // 에러 처리
@@ -51,55 +48,6 @@ static void ThrowIfFailed(HRESULT hr, const char* what)
 }
 
 // ---------------------------------------------------------------------------
-// SRV 디스크립터 힙 할당기 (ImGui 1.92 DX12 백엔드는 텍스처별로 디스크립터를 요청함)
-// ---------------------------------------------------------------------------
-struct DescriptorHeapAllocator
-{
-	ID3D12DescriptorHeap*       Heap = nullptr;
-	D3D12_CPU_DESCRIPTOR_HANDLE HeapStartCpu = {};
-	D3D12_GPU_DESCRIPTOR_HANDLE HeapStartGpu = {};
-	UINT                        HeapHandleIncrement = 0;
-	ImVector<int>               FreeIndices;
-
-	void Create(ID3D12Device* device, ID3D12DescriptorHeap* heap)
-	{
-		IM_ASSERT(Heap == nullptr && FreeIndices.empty());
-		Heap = heap;
-		D3D12_DESCRIPTOR_HEAP_DESC desc = heap->GetDesc();
-		HeapStartCpu = Heap->GetCPUDescriptorHandleForHeapStart();
-		HeapStartGpu = Heap->GetGPUDescriptorHandleForHeapStart();
-		HeapHandleIncrement = device->GetDescriptorHandleIncrementSize(desc.Type);
-		FreeIndices.reserve(static_cast<int>(desc.NumDescriptors));
-		for (int n = static_cast<int>(desc.NumDescriptors); n > 0; n--)
-			FreeIndices.push_back(n - 1);
-	}
-
-	void Destroy()
-	{
-		Heap = nullptr;
-		FreeIndices.clear();
-	}
-
-	void Alloc(D3D12_CPU_DESCRIPTOR_HANDLE* outCpu, D3D12_GPU_DESCRIPTOR_HANDLE* outGpu)
-	{
-		IM_ASSERT(FreeIndices.Size > 0);
-		int idx = FreeIndices.back();
-		FreeIndices.pop_back();
-		outCpu->ptr = HeapStartCpu.ptr + static_cast<SIZE_T>(idx) * HeapHandleIncrement;
-		outGpu->ptr = HeapStartGpu.ptr + static_cast<UINT64>(idx) * HeapHandleIncrement;
-	}
-
-	void Free(D3D12_CPU_DESCRIPTOR_HANDLE cpu, D3D12_GPU_DESCRIPTOR_HANDLE gpu)
-	{
-		int cpuIdx = static_cast<int>((cpu.ptr - HeapStartCpu.ptr) / HeapHandleIncrement);
-		int gpuIdx = static_cast<int>((gpu.ptr - HeapStartGpu.ptr) / HeapHandleIncrement);
-		IM_ASSERT(cpuIdx == gpuIdx);
-		(void)gpuIdx;
-		FreeIndices.push_back(cpuIdx);
-	}
-};
-
-// ---------------------------------------------------------------------------
 // 전역 상태
 // ---------------------------------------------------------------------------
 struct FrameContext
@@ -110,6 +58,8 @@ struct FrameContext
 
 static FrameContext                      g_frameContexts[kNumFramesInFlight];
 static UINT                              g_frameIndex = 0;
+static FrameContext*                     g_currentFrame = nullptr;
+static UINT                              g_currentBackBuffer = 0;
 
 static ComPtr<ID3D12Device>              g_device;
 static ComPtr<ID3D12CommandQueue>        g_commandQueue;
@@ -125,13 +75,16 @@ static UINT                              g_rtvDescriptorSize = 0;
 static ComPtr<ID3D12Resource>            g_backBuffers[kNumBackBuffers];
 static D3D12_CPU_DESCRIPTOR_HANDLE       g_backBufferRtv[kNumBackBuffers] = {};
 
-static ComPtr<ID3D12DescriptorHeap>      g_srvHeap;
-static DescriptorHeapAllocator           g_srvHeapAlloc;
-
 static UINT                              g_width = 0;
 static UINT                              g_height = 0;
 static UINT                              g_resizeWidth = 0;
 static UINT                              g_resizeHeight = 0;
+
+static ImGuiLayer                        g_imgui;
+
+// UI로 조절하는 값
+static float                             g_clearColor[3] = { 0.10f, 0.12f, 0.16f };
+static bool                              g_showDemoWindow = false;
 
 // ---------------------------------------------------------------------------
 // 헬퍼
@@ -157,6 +110,20 @@ static void WaitForGpu()
 	{
 		ThrowIfFailed(g_fence->SetEventOnCompletion(fenceValue, g_fenceEvent), "SetEventOnCompletion");
 		WaitForSingleObject(g_fenceEvent, INFINITE);
+	}
+}
+
+// 종료 시 사용. 초기화 도중 실패했거나 디바이스가 제거된 경우에도 예외를 던지지 않음
+static void WaitForGpuOnExit()
+{
+	if (!g_commandQueue || !g_fence || !g_fenceEvent)
+		return;
+	try
+	{
+		WaitForGpu();
+	}
+	catch (const std::exception&)
+	{
 	}
 }
 
@@ -232,16 +199,6 @@ static void CreateDeviceD3D(HWND hwnd)
 		}
 	}
 
-	// ImGui용 SRV 힙 (shader-visible)
-	{
-		D3D12_DESCRIPTOR_HEAP_DESC desc = {};
-		desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-		desc.NumDescriptors = kSrvHeapSize;
-		desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-		ThrowIfFailed(g_device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&g_srvHeap)), "CreateDescriptorHeap(SRV)");
-		g_srvHeapAlloc.Create(g_device.Get(), g_srvHeap.Get());
-	}
-
 	// 프레임별 커맨드 할당기 + 커맨드 리스트
 	for (UINT i = 0; i < kNumFramesInFlight; i++)
 	{
@@ -295,8 +252,6 @@ static void CleanupDeviceD3D()
 	g_commandList.Reset();
 	g_commandQueue.Reset();
 	g_rtvHeap.Reset();
-	g_srvHeapAlloc.Destroy();
-	g_srvHeap.Reset();
 	g_fence.Reset();
 	if (g_fenceEvent)
 	{
@@ -323,11 +278,98 @@ static void ResizeSwapChain(UINT width, UINT height)
 }
 
 // ---------------------------------------------------------------------------
+// 프레임
+// ---------------------------------------------------------------------------
+// 렌더링할 수 있는 상태인지 확인하고, 대기 중인 리사이즈를 적용
+static bool PrepareFrame(HWND hwnd)
+{
+	// 창이 가려졌거나 최소화된 경우 렌더링 쉬기
+	if ((g_swapChainOccluded && g_swapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED) || IsIconic(hwnd))
+	{
+		Sleep(10);
+		return false;
+	}
+	g_swapChainOccluded = false;
+
+	if (g_resizeWidth != 0 && g_resizeHeight != 0)
+	{
+		ResizeSwapChain(g_resizeWidth, g_resizeHeight);
+		g_resizeWidth = g_resizeHeight = 0;
+	}
+	return true;
+}
+
+// 커맨드 리스트 기록 시작: 백버퍼를 렌더 타깃으로 전환하고 클리어, 뷰포트/시저 설정
+static ID3D12GraphicsCommandList* BeginFrame()
+{
+	g_currentFrame = &WaitForNextFrameContext();
+	g_currentBackBuffer = g_swapChain->GetCurrentBackBufferIndex();
+	ID3D12Resource* backBuffer = g_backBuffers[g_currentBackBuffer].Get();
+
+	ThrowIfFailed(g_currentFrame->CommandAllocator->Reset(), "CommandAllocator::Reset");
+	ThrowIfFailed(g_commandList->Reset(g_currentFrame->CommandAllocator.Get(), nullptr), "CommandList::Reset");
+
+	D3D12_RESOURCE_BARRIER toRenderTarget = TransitionBarrier(backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+	g_commandList->ResourceBarrier(1, &toRenderTarget);
+
+	const float clear[4] = { g_clearColor[0], g_clearColor[1], g_clearColor[2], 1.0f };
+	g_commandList->ClearRenderTargetView(g_backBufferRtv[g_currentBackBuffer], clear, 0, nullptr);
+	g_commandList->OMSetRenderTargets(1, &g_backBufferRtv[g_currentBackBuffer], FALSE, nullptr);
+
+	D3D12_VIEWPORT viewport = { 0.0f, 0.0f, static_cast<float>(g_width), static_cast<float>(g_height), 0.0f, 1.0f };
+	D3D12_RECT scissor = { 0, 0, static_cast<LONG>(g_width), static_cast<LONG>(g_height) };
+	g_commandList->RSSetViewports(1, &viewport);
+	g_commandList->RSSetScissorRects(1, &scissor);
+
+	return g_commandList.Get();
+}
+
+// 커맨드 리스트 기록 종료: PRESENT로 전환, 제출, Present, 펜스 시그널
+static void EndFrame()
+{
+	ID3D12Resource* backBuffer = g_backBuffers[g_currentBackBuffer].Get();
+	D3D12_RESOURCE_BARRIER toPresent = TransitionBarrier(backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+	g_commandList->ResourceBarrier(1, &toPresent);
+	ThrowIfFailed(g_commandList->Close(), "CommandList::Close");
+
+	ID3D12CommandList* lists[] = { g_commandList.Get() };
+	g_commandQueue->ExecuteCommandLists(1, lists);
+
+	HRESULT hr = g_swapChain->Present(1, 0); // VSync
+	g_swapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
+	ThrowIfFailed(hr, "Present");
+
+	UINT64 fenceValue = ++g_fenceLastSignaledValue;
+	ThrowIfFailed(g_commandQueue->Signal(g_fence.Get(), fenceValue), "Signal");
+	g_currentFrame->FenceValue = fenceValue;
+	g_frameIndex++;
+}
+
+// ---------------------------------------------------------------------------
+// UI
+// ---------------------------------------------------------------------------
+static void DrawUI()
+{
+	ImGuiIO& io = ImGui::GetIO();
+
+	ImGui::Begin("Control Panel");
+	ImGui::Text("%.1f FPS (%.3f ms/frame)", io.Framerate, 1000.0f / io.Framerate);
+	ImGui::Text("Back buffer: %u x %u", g_width, g_height);
+	ImGui::Separator();
+	ImGui::ColorEdit3("Clear Color", g_clearColor);
+	ImGui::Checkbox("Show ImGui Demo Window", &g_showDemoWindow);
+	ImGui::End();
+
+	if (g_showDemoWindow)
+		ImGui::ShowDemoWindow(&g_showDemoWindow);
+}
+
+// ---------------------------------------------------------------------------
 // Win32
 // ---------------------------------------------------------------------------
 static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-	if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
+	if (ImGuiLayer::HandleMessage(hWnd, msg, wParam, lParam))
 		return true;
 
 	switch (msg)
@@ -349,175 +391,77 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
+static HWND CreateAppWindow(HINSTANCE hInstance, float dpiScale)
+{
+	WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance, nullptr, LoadCursor(nullptr, IDC_ARROW), nullptr, nullptr, kWindowClassName, nullptr };
+	RegisterClassExW(&wc);
+	return CreateWindowW(kWindowClassName, L"DirectX 12 + ImGui", WS_OVERLAPPEDWINDOW,
+		100, 100, static_cast<int>(1280 * dpiScale), static_cast<int>(800 * dpiScale), nullptr, nullptr, hInstance, nullptr);
+}
+
+static void DestroyAppWindow(HWND hwnd, HINSTANCE hInstance)
+{
+	DestroyWindow(hwnd);
+	UnregisterClassW(kWindowClassName, hInstance);
+}
+
+// 대기 중인 메시지를 모두 처리. WM_QUIT를 받으면 false
+static bool PumpMessages()
+{
+	MSG msg;
+	while (PeekMessageW(&msg, nullptr, 0U, 0U, PM_REMOVE))
+	{
+		if (msg.message == WM_QUIT)
+			return false;
+		TranslateMessage(&msg);
+		DispatchMessageW(&msg);
+	}
+	return true;
+}
+
 // ---------------------------------------------------------------------------
 // 진입점
 // ---------------------------------------------------------------------------
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 {
-	ImGui_ImplWin32_EnableDpiAwareness();
-	const float mainScale = ImGui_ImplWin32_GetDpiScaleForMonitor(MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY));
-
-	WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance, nullptr, LoadCursor(nullptr, IDC_ARROW), nullptr, nullptr, L"DirectX12Sample", nullptr };
-	RegisterClassExW(&wc);
-	HWND hwnd = CreateWindowW(wc.lpszClassName, L"DirectX 12 + ImGui", WS_OVERLAPPEDWINDOW,
-		100, 100, static_cast<int>(1280 * mainScale), static_cast<int>(800 * mainScale), nullptr, nullptr, wc.hInstance, nullptr);
-
-	try
-	{
-		CreateDeviceD3D(hwnd);
-		// TODO: 렌더링 파이프라인 생성 (루트 시그니처, 셰이더, PSO, 버텍스 버퍼 등)
-	}
-	catch (const std::exception& e)
-	{
-		MessageBoxA(hwnd, e.what(), "Initialization Error", MB_OK | MB_ICONERROR);
-		CleanupDeviceD3D();
-		DestroyWindow(hwnd);
-		UnregisterClassW(wc.lpszClassName, wc.hInstance);
-		return 1;
-	}
-
-	ShowWindow(hwnd, SW_SHOWDEFAULT);
-	UpdateWindow(hwnd);
-
-	// ImGui 초기화
-	IMGUI_CHECKVERSION();
-	ImGui::CreateContext();
-	ImGuiIO& io = ImGui::GetIO();
-	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-
-	ImGui::StyleColorsDark();
-	ImGuiStyle& style = ImGui::GetStyle();
-	style.ScaleAllSizes(mainScale);
-	style.FontScaleDpi = mainScale;
-
-	ImGui_ImplWin32_Init(hwnd);
-
-	ImGui_ImplDX12_InitInfo initInfo;
-	initInfo.Device = g_device.Get();
-	initInfo.CommandQueue = g_commandQueue.Get();
-	initInfo.NumFramesInFlight = kNumFramesInFlight;
-	initInfo.RTVFormat = kBackBufferFormat;
-	initInfo.DSVFormat = DXGI_FORMAT_UNKNOWN;
-	initInfo.SrvDescriptorHeap = g_srvHeap.Get();
-	initInfo.SrvDescriptorAllocFn = [](ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* outCpu, D3D12_GPU_DESCRIPTOR_HANDLE* outGpu) { g_srvHeapAlloc.Alloc(outCpu, outGpu); };
-	initInfo.SrvDescriptorFreeFn = [](ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE cpu, D3D12_GPU_DESCRIPTOR_HANDLE gpu) { g_srvHeapAlloc.Free(cpu, gpu); };
-	ImGui_ImplDX12_Init(&initInfo);
-
-	// UI로 조절하는 값
-	float clearColor[3] = { 0.10f, 0.12f, 0.16f };
-	bool showDemoWindow = false;
+	const float dpiScale = ImGuiLayer::EnableDpiAwareness();
+	HWND hwnd = CreateAppWindow(hInstance, dpiScale);
 
 	int exitCode = 0;
 	try
 	{
-		bool done = false;
-		while (!done)
+		CreateDeviceD3D(hwnd);
+		// TODO: 렌더링 파이프라인 생성 (루트 시그니처, 셰이더, PSO, 버텍스 버퍼 등)
+		g_imgui.Init(hwnd, g_device.Get(), g_commandQueue.Get(), kNumFramesInFlight, kBackBufferFormat, dpiScale);
+
+		ShowWindow(hwnd, SW_SHOWDEFAULT);
+		UpdateWindow(hwnd);
+
+		while (PumpMessages())
 		{
-			MSG msg;
-			while (PeekMessageW(&msg, nullptr, 0U, 0U, PM_REMOVE))
-			{
-				TranslateMessage(&msg);
-				DispatchMessageW(&msg);
-				if (msg.message == WM_QUIT)
-					done = true;
-			}
-			if (done)
-				break;
-
-			// 창이 가려졌거나 최소화된 경우 렌더링 쉬기
-			if ((g_swapChainOccluded && g_swapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED) || IsIconic(hwnd))
-			{
-				Sleep(10);
+			if (!PrepareFrame(hwnd))
 				continue;
-			}
-			g_swapChainOccluded = false;
 
-			if (g_resizeWidth != 0 && g_resizeHeight != 0)
-			{
-				ResizeSwapChain(g_resizeWidth, g_resizeHeight);
-				g_resizeWidth = g_resizeHeight = 0;
-			}
+			g_imgui.BeginFrame();
+			DrawUI();
 
-			// ---- UI ----
-			ImGui_ImplDX12_NewFrame();
-			ImGui_ImplWin32_NewFrame();
-			ImGui::NewFrame();
-
-			ImGui::Begin("Control Panel");
-			ImGui::Text("%.1f FPS (%.3f ms/frame)", io.Framerate, 1000.0f / io.Framerate);
-			ImGui::Text("Back buffer: %u x %u", g_width, g_height);
-			ImGui::Separator();
-			ImGui::ColorEdit3("Clear Color", clearColor);
-			ImGui::Checkbox("Show ImGui Demo Window", &showDemoWindow);
-			ImGui::End();
-
-			if (showDemoWindow)
-				ImGui::ShowDemoWindow(&showDemoWindow);
-
-			ImGui::Render();
-
-			// ---- 커맨드 기록 ----
-			FrameContext& frame = WaitForNextFrameContext();
-			UINT backBufferIdx = g_swapChain->GetCurrentBackBufferIndex();
-			ID3D12Resource* backBuffer = g_backBuffers[backBufferIdx].Get();
-
-			ThrowIfFailed(frame.CommandAllocator->Reset(), "CommandAllocator::Reset");
-			ThrowIfFailed(g_commandList->Reset(frame.CommandAllocator.Get(), nullptr), "CommandList::Reset");
-
-			D3D12_RESOURCE_BARRIER toRenderTarget = TransitionBarrier(backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-			g_commandList->ResourceBarrier(1, &toRenderTarget);
-
-			const float clear[4] = { clearColor[0], clearColor[1], clearColor[2], 1.0f };
-			g_commandList->ClearRenderTargetView(g_backBufferRtv[backBufferIdx], clear, 0, nullptr);
-			g_commandList->OMSetRenderTargets(1, &g_backBufferRtv[backBufferIdx], FALSE, nullptr);
-
-			D3D12_VIEWPORT viewport = { 0.0f, 0.0f, static_cast<float>(g_width), static_cast<float>(g_height), 0.0f, 1.0f };
-			D3D12_RECT scissor = { 0, 0, static_cast<LONG>(g_width), static_cast<LONG>(g_height) };
-			g_commandList->RSSetViewports(1, &viewport);
-			g_commandList->RSSetScissorRects(1, &scissor);
-
+			ID3D12GraphicsCommandList* commandList = BeginFrame();
 			// TODO: 직접 만든 파이프라인으로 드로우
-
-			// ImGui
-			ID3D12DescriptorHeap* heaps[] = { g_srvHeap.Get() };
-			g_commandList->SetDescriptorHeaps(1, heaps);
-			ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_commandList.Get());
-
-			D3D12_RESOURCE_BARRIER toPresent = TransitionBarrier(backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
-			g_commandList->ResourceBarrier(1, &toPresent);
-			ThrowIfFailed(g_commandList->Close(), "CommandList::Close");
-
-			ID3D12CommandList* lists[] = { g_commandList.Get() };
-			g_commandQueue->ExecuteCommandLists(1, lists);
-
-			// ---- Present ----
-			HRESULT hr = g_swapChain->Present(1, 0); // VSync
-			g_swapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
-			ThrowIfFailed(hr, "Present");
-
-			UINT64 fenceValue = ++g_fenceLastSignaledValue;
-			ThrowIfFailed(g_commandQueue->Signal(g_fence.Get(), fenceValue), "Signal");
-			frame.FenceValue = fenceValue;
-			g_frameIndex++;
+			g_imgui.Render(commandList);
+			EndFrame();
 		}
 	}
 	catch (const std::exception& e)
 	{
-		MessageBoxA(hwnd, e.what(), "Runtime Error", MB_OK | MB_ICONERROR);
+		MessageBoxA(hwnd, e.what(), "Error", MB_OK | MB_ICONERROR);
 		exitCode = 1;
 	}
 
-	// ---- 종료 ----
-	WaitForGpu();
-
-	ImGui_ImplDX12_Shutdown();
-	ImGui_ImplWin32_Shutdown();
-	ImGui::DestroyContext();
-
+	WaitForGpuOnExit();
+	g_imgui.Shutdown();
 	// TODO: 직접 만든 파이프라인 리소스 해제 (CleanupDeviceD3D 이전에)
 	CleanupDeviceD3D();
-	DestroyWindow(hwnd);
-	UnregisterClassW(wc.lpszClassName, wc.hInstance);
+	DestroyAppWindow(hwnd, hInstance);
 
 	return exitCode;
 }
