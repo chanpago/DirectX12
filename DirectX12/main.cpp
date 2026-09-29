@@ -33,7 +33,7 @@ static constexpr UINT        kNumFramesInFlight = 2;
 static constexpr UINT        kNumBackBuffers    = 3;
 static constexpr DXGI_FORMAT kBackBufferFormat  = DXGI_FORMAT_R8G8B8A8_UNORM;
 static constexpr wchar_t     kWindowClassName[] = L"DirectX12Sample";
-
+static constexpr DXGI_FORMAT kDepthFormat		= DXGI_FORMAT_D32_FLOAT;
 // ---------------------------------------------------------------------------
 // 에러 처리
 // ---------------------------------------------------------------------------
@@ -74,6 +74,10 @@ static ComPtr<ID3D12DescriptorHeap>      g_rtvHeap;
 static UINT                              g_rtvDescriptorSize = 0;
 static ComPtr<ID3D12Resource>            g_backBuffers[kNumBackBuffers];
 static D3D12_CPU_DESCRIPTOR_HANDLE       g_backBufferRtv[kNumBackBuffers] = {};
+
+static ComPtr<ID3D12DescriptorHeap>		 g_dsvHeap;
+static ComPtr<ID3D12Resource>			 g_depthBuffer;
+static D3D12_CPU_DESCRIPTOR_HANDLE		 g_depthBufferDsv = {};
 
 static UINT                              g_width = 0;
 static UINT                              g_height = 0;
@@ -149,6 +153,36 @@ static void CreateRenderTargets()
 		ThrowIfFailed(g_swapChain->GetBuffer(i, IID_PPV_ARGS(&g_backBuffers[i])), "GetBuffer");
 		g_device->CreateRenderTargetView(g_backBuffers[i].Get(), nullptr, g_backBufferRtv[i]);
 	}
+}
+
+static void CreateDepthBuffer()
+{
+	D3D12_HEAP_PROPERTIES heapProps = {};
+	heapProps.Type = D3D12_HEAP_TYPE_DEFAULT; //default
+
+	D3D12_RESOURCE_DESC depthDesc = {};
+	depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	depthDesc.Width = g_width;
+	depthDesc.Height = g_height;
+	depthDesc.DepthOrArraySize = 1;
+	depthDesc.MipLevels = 1;
+	depthDesc.Format = kDepthFormat;
+	depthDesc.SampleDesc.Count = 1;
+	depthDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+	depthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+	D3D12_CLEAR_VALUE depthClearValue = {};
+	depthClearValue.Format = kDepthFormat;
+	depthClearValue.DepthStencil.Depth = 1.0f;
+	depthClearValue.DepthStencil.Stencil = 0;
+
+	ThrowIfFailed(g_device->CreateCommittedResource(
+		&heapProps, D3D12_HEAP_FLAG_NONE, &depthDesc,
+		D3D12_RESOURCE_STATE_DEPTH_WRITE,
+		&depthClearValue,
+		IID_PPV_ARGS(&g_depthBuffer)), "CreatecommittedResource(Depth)");
+	
+	g_device->CreateDepthStencilView(g_depthBuffer.Get(), nullptr, g_depthBufferDsv);
 }
 
 static void CleanupRenderTargets()
@@ -241,10 +275,27 @@ static void CreateDeviceD3D(HWND hwnd)
 	}
 
 	CreateRenderTargets();
+
+	//dsv 힙을 설정한다
+	{
+		D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+		desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+		desc.NumDescriptors = 1;
+		desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+		ThrowIfFailed(g_device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&g_dsvHeap)), "CreateDescriptorHeap(DSV)");
+		
+		g_depthBufferDsv = g_dsvHeap->GetCPUDescriptorHandleForHeapStart();
+	}
+
+	CreateDepthBuffer();
+
+
 }
 
 static void CleanupDeviceD3D()
 {
+	g_depthBuffer.Reset();
+	g_dsvHeap.Reset();
 	CleanupRenderTargets();
 	g_swapChain.Reset();
 	for (UINT i = 0; i < kNumFramesInFlight; i++)
@@ -271,10 +322,12 @@ static void ResizeSwapChain(UINT width, UINT height)
 {
 	WaitForGpu();
 	CleanupRenderTargets();
+	g_depthBuffer.Reset();
 	ThrowIfFailed(g_swapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0), "ResizeBuffers");
 	g_width = width;
 	g_height = height;
 	CreateRenderTargets();
+	CreateDepthBuffer();
 }
 
 // ---------------------------------------------------------------------------
