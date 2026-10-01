@@ -1,4 +1,4 @@
-#include "ControlPanel.h"
+﻿#include "ControlPanel.h"
 
 #include "imgui.h"
 
@@ -11,6 +11,7 @@ void ControlPanel::Draw(UINT backBufferWidth, UINT backBufferHeight)
 	ImGui::Text("Back buffer: %u x %u", backBufferWidth, backBufferHeight);
 	ImGui::Separator();
 	ImGui::ColorEdit3("Clear Color", m_clearColor); // 알파(m_clearColor[3])는 1로 고정
+	ImGui::SliderFloat("Rotation (deg/s)", &m_rotationSpeed, 0.0f, 360.0f);
 	ImGui::Checkbox("Show ImGui Demo Window", &m_showDemoWindow);
 	ImGui::End();
 

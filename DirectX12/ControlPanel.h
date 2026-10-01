@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "D3DUtil.h"
 
@@ -10,8 +10,10 @@ public:
 	void Draw(UINT backBufferWidth, UINT backBufferHeight);
 
 	const float* ClearColor() const { return m_clearColor; }
+	float        RotationSpeed() const { return m_rotationSpeed; } // 도/초
 
 private:
 	float m_clearColor[4] = { 0.10f, 0.12f, 0.16f, 1.0f };
 	bool  m_showDemoWindow = false;
+	float m_rotationSpeed = 45.0f;
 };

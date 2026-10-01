@@ -98,6 +98,9 @@
     <ClCompile Include="ImGuiLayer.cpp" />
     <ClCompile Include="GraphicsDevice.cpp" />
     <ClCompile Include="ControlPanel.cpp" />
+    <ClCompile Include="Mesh.cpp" />
+    <ClCompile Include="RootSignature.cpp" />
+    <ClCompile Include="BasicPipeline.cpp" />
     <ClCompile Include="imgui\imgui.cpp" />
     <ClCompile Include="imgui\imgui_demo.cpp" />
     <ClCompile Include="imgui\imgui_draw.cpp" />
@@ -111,6 +114,9 @@
     <ClInclude Include="D3DUtil.h" />
     <ClInclude Include="GraphicsDevice.h" />
     <ClInclude Include="ControlPanel.h" />
+    <ClInclude Include="Mesh.h" />
+    <ClInclude Include="RootSignature.h" />
+    <ClInclude Include="BasicPipeline.h" />
     <ClInclude Include="imgui\imconfig.h" />
     <ClInclude Include="imgui\imgui.h" />
     <ClInclude Include="imgui\imgui_impl_dx12.h" />

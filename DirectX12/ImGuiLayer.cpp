@@ -62,7 +62,7 @@ bool ImGuiLayer::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
 }
 
 void ImGuiLayer::Init(HWND hwnd, ID3D12Device* device, ID3D12CommandQueue* commandQueue,
-	UINT numFramesInFlight, DXGI_FORMAT rtvFormat, float dpiScale)
+	UINT numFramesInFlight, DXGI_FORMAT rtvFormat, DXGI_FORMAT dsvFormat, float dpiScale)
 {
 	// ImGui용 SRV 힙 (shader-visible)
 	D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
@@ -90,7 +90,7 @@ void ImGuiLayer::Init(HWND hwnd, ID3D12Device* device, ID3D12CommandQueue* comma
 	initInfo.CommandQueue = commandQueue;
 	initInfo.NumFramesInFlight = static_cast<int>(numFramesInFlight);
 	initInfo.RTVFormat = rtvFormat;
-	initInfo.DSVFormat = DXGI_FORMAT_UNKNOWN;
+	initInfo.DSVFormat = dsvFormat; // ImGui PSO도 붙어 있는 DSV와 포맷이 같아야 함 (깊이 테스트는 안 함)
 	initInfo.UserData = this;
 	initInfo.SrvDescriptorHeap = m_srvHeap.Get();
 	initInfo.SrvDescriptorAllocFn = [](ImGui_ImplDX12_InitInfo* info, D3D12_CPU_DESCRIPTOR_HANDLE* outCpu, D3D12_GPU_DESCRIPTOR_HANDLE* outGpu)

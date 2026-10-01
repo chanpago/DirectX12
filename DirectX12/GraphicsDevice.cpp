@@ -1,4 +1,4 @@
-#include "GraphicsDevice.h"
+﻿#include "GraphicsDevice.h"
 
 #ifdef _DEBUG
 #include <dxgidebug.h>
@@ -29,6 +29,16 @@ void GraphicsDevice::Init(HWND hwnd)
 	ThrowIfFailed(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
 
 	ThrowIfFailed(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_device)), "D3D12CreateDevice");
+
+#ifdef _DEBUG
+	// 디버그 레이어가 에러를 보고하면 그 자리에서 멈춤 (VS 디버거에서 호출 스택 확인 가능)
+	ComPtr<ID3D12InfoQueue> infoQueue;
+	if (SUCCEEDED(m_device.As(&infoQueue)))
+	{
+		infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
+		infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
+	}
+#endif
 
 	// 커맨드 큐
 	{
@@ -260,7 +270,8 @@ ID3D12GraphicsCommandList* GraphicsDevice::BeginFrame(const float clearColor[4])
 	m_commandList->ResourceBarrier(1, &toRenderTarget);
 
 	m_commandList->ClearRenderTargetView(m_backBufferRtv[m_currentBackBuffer], clearColor, 0, nullptr);
-	m_commandList->OMSetRenderTargets(1, &m_backBufferRtv[m_currentBackBuffer], FALSE, nullptr);
+	m_commandList->ClearDepthStencilView(m_depthBufferDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr); // 1.0 = 가장 먼 값
+	m_commandList->OMSetRenderTargets(1, &m_backBufferRtv[m_currentBackBuffer], FALSE, &m_depthBufferDsv);
 
 	D3D12_VIEWPORT viewport = { 0.0f, 0.0f, static_cast<float>(m_width), static_cast<float>(m_height), 0.0f, 1.0f };
 	D3D12_RECT scissor = { 0, 0, static_cast<LONG>(m_width), static_cast<LONG>(m_height) };

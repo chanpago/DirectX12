@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "D3DUtil.h"
 
@@ -26,7 +26,7 @@ public:
 	bool IsOccluded();
 	void Resize(UINT width, UINT height);
 
-	// 커맨드 리스트 기록 시작: 백버퍼를 렌더 타깃으로 전환하고 클리어, 뷰포트/시저 설정
+	// 커맨드 리스트 기록 시작: 백버퍼를 렌더 타깃으로 전환하고 컬러/깊이 클리어, RTV+DSV/뷰포트/시저 설정
 	ID3D12GraphicsCommandList* BeginFrame(const float clearColor[4]);
 	// 커맨드 리스트 기록 종료: PRESENT로 전환, 제출, Present, 펜스 시그널
 	void EndFrame();

@@ -13,6 +13,9 @@
     <ClCompile Include="ImGuiLayer.cpp" />
     <ClCompile Include="GraphicsDevice.cpp" />
     <ClCompile Include="ControlPanel.cpp" />
+    <ClCompile Include="Mesh.cpp" />
+    <ClCompile Include="RootSignature.cpp" />
+    <ClCompile Include="BasicPipeline.cpp" />
     <ClCompile Include="imgui\imgui.cpp">
       <Filter>imgui</Filter>
     </ClCompile>
@@ -40,6 +43,9 @@
     <ClInclude Include="D3DUtil.h" />
     <ClInclude Include="GraphicsDevice.h" />
     <ClInclude Include="ControlPanel.h" />
+    <ClInclude Include="Mesh.h" />
+    <ClInclude Include="RootSignature.h" />
+    <ClInclude Include="BasicPipeline.h" />
     <ClInclude Include="imgui\imconfig.h">
       <Filter>imgui</Filter>
     </ClInclude>

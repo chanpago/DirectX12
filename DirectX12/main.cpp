@@ -1,4 +1,4 @@
-// DirectX 12 + Dear ImGui 기초 렌더링 연습
+﻿// DirectX 12 + Dear ImGui 기초 렌더링 연습
 // - D3D12 디바이스 / 스왑체인 / 프레임 동기화: GraphicsDevice
 // - ImGui 백엔드: ImGuiLayer, 컨트롤 패널 UI: ControlPanel
 // - 렌더링 파이프라인(루트 시그니처, 셰이더, PSO, 버텍스 버퍼, 드로우)은 직접 작성
@@ -7,12 +7,44 @@
 #include "GraphicsDevice.h"
 #include "ImGuiLayer.h"
 #include "ControlPanel.h"
+#include "Mesh.h"
+#include "RootSignature.h"
+#include "BasicPipeline.h"
+
+using namespace DirectX;
 
 static constexpr wchar_t kWindowClassName[] = L"DirectX12Sample";
 
 // WM_SIZE로 들어온 새 크기. 메인 루프에서 적용 후 0으로 되돌림
 static UINT g_resizeWidth = 0;
 static UINT g_resizeHeight = 0;
+
+// ---------------------------------------------------------------------------
+// 렌더링
+// ---------------------------------------------------------------------------
+// 큐브의 MVP 행렬 (셰이더로 넘기기 위해 전치된 상태로 반환)
+// 왼손 좌표계, Y-up, +Z 앞쪽
+static XMFLOAT4X4 ComputeCubeMvp(float angleRadians, float aspectRatio)
+{
+	// Model(World): 로컬 → 월드. Y축으로 회전
+	XMMATRIX world = XMMatrixRotationY(angleRadians);
+
+	// View: 월드 → 카메라. 앞쪽(-Z) 약간 위에서 원점을 바라봄
+	XMVECTOR eye    = XMVectorSet(0.0f, 1.5f, -3.0f, 1.0f);
+	XMVECTOR target = XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f);
+	XMVECTOR up     = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+	XMMATRIX view = XMMatrixLookAtLH(eye, target, up);
+
+	// Projection: 카메라 → 클립 공간. 세로 시야각 45도, 화면 비율, near / far
+	XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PIDIV4, aspectRatio, 0.1f, 100.0f);
+
+	// 행 벡터 규약: v * World * View * Proj
+	XMMATRIX mvp = world * view * proj;
+
+	XMFLOAT4X4 result;
+	XMStoreFloat4x4(&result, XMMatrixTranspose(mvp));
+	return result;
+}
 
 // ---------------------------------------------------------------------------
 // Win32
@@ -80,14 +112,21 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 	GraphicsDevice gfx;
 	ImGuiLayer     imgui;
 	ControlPanel   controlPanel;
+	Mesh           cube;
+	RootSignature  rootSignature;
+	BasicPipeline  basicPipeline;
+
+	float cubeAngle = 0.0f; // 라디안
 
 	int exitCode = 0;
 	try
 	{
 		gfx.Init(hwnd);
-		// TODO: 렌더링 파이프라인 생성 (루트 시그니처, 셰이더, PSO, 버텍스 버퍼 등)
+		cube.Init(gfx.Device());
+		rootSignature.Init(gfx.Device());
+		basicPipeline.Init(gfx.Device(), rootSignature.Get(), GraphicsDevice::kBackBufferFormat, GraphicsDevice::kDepthFormat);
 		imgui.Init(hwnd, gfx.Device(), gfx.CommandQueue(), GraphicsDevice::kNumFramesInFlight,
-			GraphicsDevice::kBackBufferFormat, dpiScale);
+			GraphicsDevice::kBackBufferFormat, GraphicsDevice::kDepthFormat, dpiScale);
 
 		ShowWindow(hwnd, SW_SHOWDEFAULT);
 		UpdateWindow(hwnd);
@@ -109,8 +148,21 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 			imgui.BeginFrame();
 			controlPanel.Draw(gfx.Width(), gfx.Height());
 
+			// 업데이트: 회전 각도 누적 → MVP 계산
+			cubeAngle += XMConvertToRadians(controlPanel.RotationSpeed()) * ImGui::GetIO().DeltaTime;
+			const float aspectRatio = static_cast<float>(gfx.Width()) / static_cast<float>(gfx.Height());
+			const XMFLOAT4X4 mvp = ComputeCubeMvp(cubeAngle, aspectRatio);
+
 			ID3D12GraphicsCommandList* commandList = gfx.BeginFrame(controlPanel.ClearColor());
-			// TODO: 직접 만든 파이프라인으로 드로우
+			// 큐브 드로우: 틀(루트 시그니처) → 처리 방법(PSO) → 데이터(버퍼) → 그리기
+			commandList->SetGraphicsRootSignature(rootSignature.Get());
+			commandList->SetPipelineState(basicPipeline.Get());
+			commandList->SetGraphicsRoot32BitConstants(RootSignature::kTransformParam, 16, &mvp, 0);
+			commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+			commandList->IASetVertexBuffers(0, 1, &cube.VertexBufferView());
+			commandList->IASetIndexBuffer(&cube.IndexBufferView());
+			commandList->DrawIndexedInstanced(cube.IndexCount(), 1, 0, 0, 0);
+
 			imgui.Render(commandList);
 			gfx.EndFrame();
 		}
@@ -123,7 +175,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 
 	gfx.WaitForGpuOnExit();
 	imgui.Shutdown();
-	// TODO: 직접 만든 파이프라인 리소스 해제 (gfx.Shutdown 이전에)
+	// 직접 만든 파이프라인 리소스 해제 (GPU 대기 후, gfx.Shutdown 이전에)
+	basicPipeline.Shutdown();
+	rootSignature.Shutdown();
+	cube.Shutdown();
 	gfx.Shutdown();
 	DestroyAppWindow(hwnd, hInstance);
 

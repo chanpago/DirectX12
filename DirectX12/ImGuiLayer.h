@@ -19,8 +19,9 @@ public:
 	// WndProc 맨 앞에서 호출. true면 ImGui가 메시지를 처리한 것
 	static bool HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
+	// rtvFormat / dsvFormat: ImGui를 그릴 때 붙어 있는 렌더 타깃 / 깊이 버퍼의 포맷
 	void Init(HWND hwnd, ID3D12Device* device, ID3D12CommandQueue* commandQueue,
-		UINT numFramesInFlight, DXGI_FORMAT rtvFormat, float dpiScale);
+		UINT numFramesInFlight, DXGI_FORMAT rtvFormat, DXGI_FORMAT dsvFormat, float dpiScale);
 	void Shutdown();
 
 	// 매 프레임 UI 코드 작성 전에 호출
