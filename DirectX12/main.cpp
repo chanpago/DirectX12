@@ -42,7 +42,8 @@ static XMFLOAT4X4 ComputeCubeMvp(float angleRadians, float aspectRatio)
 	XMMATRIX mvp = world * view * proj;
 
 	XMFLOAT4X4 result;
-	XMStoreFloat4x4(&result, XMMatrixTranspose(mvp));
+	//XMStoreFloat4x4(&result, XMMatrixTranspose(mvp));
+	XMStoreFloat4x4(&result, mvp);
 	return result;
 }
 
@@ -124,6 +125,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 		gfx.Init(hwnd);
 		cube.Init(gfx.Device());
 		rootSignature.Init(gfx.Device());
+
+		// 이 부분은 PSO(Pipeline State Object)를 만드는 호출
+		// 루트 시그니처가 셰이더 입력의 틀이었다면, PSO는 이 물체를 어떻게 그릴지데 대한 설정 전부를 하나로 묶은 객체
 		basicPipeline.Init(gfx.Device(), rootSignature.Get(), GraphicsDevice::kBackBufferFormat, GraphicsDevice::kDepthFormat);
 		imgui.Init(hwnd, gfx.Device(), gfx.CommandQueue(), GraphicsDevice::kNumFramesInFlight,
 			GraphicsDevice::kBackBufferFormat, GraphicsDevice::kDepthFormat, dpiScale);

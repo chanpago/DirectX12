@@ -4,6 +4,25 @@
 #include "BasicVS.h"
 #include "BasicPS.h"
 
+
+// PSO(Pipeline State Object) 이 과정에서는 루트 시그니처와 다르게 직렬화가 안일어남
+// 결국 API를 그렇게 설계했기 때문. 핵심은 RootSignature는 blob형태로 주고받을 일이 많은 데이터라는점
+// RootSignature를 blob으로 받는이유
+// 1. 셰이더 안에 넣을 수 있다. 루트 시그니처는 C++코드 대신HLSL에 직접 적을 수 있다. 이렇게하면
+// 셰이더 컴파일러(FXC/DXC)가 루트 시그니처를 셰이더 바이트코드안에 blob으로 포함시킴
+// 2. 툴끼리 주고받는 표준 포맷
+// 버전이 정해진 바이너리 포맷이라 오프라인에서 미리 만들어 파일로 저장해 둘 수 있음
+//
+// PSO는 왜 구조체를 바로받나
+// PSO desc안의 무거운 부분(셰이더)은 이미 blob(g_BasicVS, g_BasicPS). 나머지는 래스터라이저, 블랜드 같은 단순한
+// 설정값이라 따로 직렬화할 이유가 별로없다.
+// PSO도 직렬화가 있긴함. 근데 용도가 다름 GetCatchedBlob()으로 드라이버가 컴파일을 끝낸 결과를 꺼내 파일로
+// 저장이 가능. 다음 실행 때 desc.CatchedPSO에 넣으면 컴파일 시간을 줄일 수 있음
+// Blob이 뭔가?
+// Binary Large Object의 약자. 그냥 "내용 형식은 신경쓰지 않는 바이트 덩어리" 라는 뜻
+// D3D에서는 바이트 덩어리를 담는 COM 객체예요. 함수가 사실상 두 개뿐
+// blob->GetBufferPointer(); // 바이트 시작 주소 (void*)
+// blob->GetBufferSize();    // 바이트 크기
 void BasicPipeline::Init(ID3D12Device* device, ID3D12RootSignature* rootSignature, DXGI_FORMAT rtvFormat, DXGI_FORMAT dsvFormat)
 {
 	// 1. 입력 레이아웃: Vertex 구조체(Mesh.h)와 Common.hlsli의 VSInput에 맞춤

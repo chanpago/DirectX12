@@ -4,7 +4,7 @@
 // C++(DirectXMath)은 행 우선, HLSL cbuffer 기본은 열 우선이라 C++에서 전치해서 넘김
 cbuffer Transform : register(b0)
 {
-	float4x4 g_mvp; // 로컬 → 월드 → 뷰 → 클립 공간
+	row_major float4x4 g_mvp; // 로컬 → 월드 → 뷰 → 클립 공간
 };
 
 // 로컬 좌표 정점을 MVP로 클립 공간 좌표로 변환
