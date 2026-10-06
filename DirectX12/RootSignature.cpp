@@ -5,28 +5,36 @@
 // SetGraphicsroot32Bitconstants로 넣는다
 // 이 Rootsignature가 담고있는정보(2가지)는 다음과같다.
 // 슬롯0번, b0레지스터에 32비트값16개(4x4)를 루트 상수로 넘기고 vs만 볼 수 있게 한다.
+// 슬롯1번, t0레지스터에 인스턴스 버퍼(StructuredBuffer)의 GPU 주소를 루트 SRV로 넘기고 vs만 볼 수 있게 한다.
 // 플래그, IA 입력 레이아웃(버텍스버퍼로 정점받기)을 허용한다.
 void RootSignature::Init(ID3D12Device* device)
 {
 	// 1. 파라미터 0: 루트 상수. 힙이나 버퍼 없이 값 자체를 커맨드 리스트에 직접 기록
 	
-	D3D12_ROOT_PARAMETER params[1] = {};
+	D3D12_ROOT_PARAMETER params[2] = {};
 
 	// 이슬롯에 값자체를 넣겠다는 뜻. uav, srv, dsv와 다르게 디스크립터를 쓰지않고 값을 넣겠다는뜻
-	params[kTransformParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+	params[kViewProjParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
 
-	// hlsl의 register(b0)과 연결됨 
-	params[kTransformParam].Constants.ShaderRegister = 0;  // b0
-	params[kTransformParam].Constants.RegisterSpace = 0;
+	// hlsl의 register(b0)과 연결됨
+	params[kViewProjParam].Constants.ShaderRegister = 0;  // b0
+	params[kViewProjParam].Constants.RegisterSpace = 0;
 
 	// 32비트값 16개(float 16개를 사용한다는뜻 4x4)
-	params[kTransformParam].Constants.Num32BitValues = 16; // float4x4 = 32비트 × 16
+	params[kViewProjParam].Constants.Num32BitValues = 16; // float4x4 = 32비트 × 16
 
-	// 이 코드의 뜻은 이 파라미터(mvp행렬)을 어느 셰이더 단계에서 볼 수 있게 할지 정하는 설정
+	// 이 코드의 뜻은 이 파라미터(viewProj행렬)을 어느 셰이더 단계에서 볼 수 있게 할지 정하는 설정
 	// 지금의 설정은 버텍스 셰이더에서만 보이게한다.
 	// D3D12_SHADER_VISIBILITY_ALL, D3D12_SHADER_VISIBILITY_PIXEL 두가지가있는데
 	// 여기서는 vertex만씀 이렇게 좁히면 필요한 단꼐에만 데이터를 전달하니까 드라이버가 최적화할 여지가 생김
-	params[kTransformParam].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+	params[kViewProjParam].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+
+	// 1-2. 파라미터 1: 루트 SRV. 버퍼의 GPU 주소(64비트 = 2 DWORD)를 직접 넣음
+	//      디스크립터 힙 / CreateShaderResourceView 없이 바인딩 가능 (텍스처는 불가, 버퍼만 가능)
+	params[kInstanceParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+	params[kInstanceParam].Descriptor.ShaderRegister = 0; // t0
+	params[kInstanceParam].Descriptor.RegisterSpace = 0;
+	params[kInstanceParam].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
 
 	// 2. 루트 시그니처 설명. 버텍스 버퍼(입력 레이아웃)를 쓰려면 플래그 필수
 	D3D12_ROOT_SIGNATURE_DESC desc = {};

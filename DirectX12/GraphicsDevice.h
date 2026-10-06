@@ -36,6 +36,9 @@ public:
 	ID3D12GraphicsCommandList* CommandList() const  { return m_commandList.Get(); }
 	UINT                       Width() const        { return m_width; }
 	UINT                       Height() const       { return m_height; }
+	// 이번 프레임의 프레임 컨텍스트 번호 (0 ~ kNumFramesInFlight-1). BeginFrame ~ EndFrame 사이에서만 유효
+	// 프레임마다 따로 두는 리소스(인스턴스 버퍼 등)를 고를 때 사용
+	UINT                       FrameIndex() const   { return m_frameIndex % kNumFramesInFlight; }
 	D3D12_CPU_DESCRIPTOR_HANDLE CurrentBackBufferRtv() const { return m_backBufferRtv[m_currentBackBuffer]; }
 	D3D12_CPU_DESCRIPTOR_HANDLE DepthBufferDsv() const       { return m_depthBufferDsv; }
 

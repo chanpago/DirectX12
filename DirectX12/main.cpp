@@ -11,6 +11,7 @@
 #include "RootSignature.h"
 #include "BasicPipeline.h"
 #include "Camera.h"
+#include "InstanceBuffer.h"
 
 using namespace DirectX;
 
@@ -23,24 +24,44 @@ static UINT g_resizeHeight = 0;
 // ---------------------------------------------------------------------------
 // 렌더링
 // ---------------------------------------------------------------------------
-// 큐브의 MVP 행렬 (전치하지 않음. 셰이더의 g_mvp가 row_major라 그대로 읽음)
-// 왼손 좌표계, Y-up, +Z 앞쪽
-static XMFLOAT4X4 ComputeCubeMvp(float angleRadians, const Camera& camera, float aspectRatio)
-{
-	// Model(World): 로컬 → 월드. Y축으로 회전
-	XMMATRIX world = XMMatrixRotationY(angleRadians);
+// 왼손 좌표계, Y-up, +Z 앞쪽. 행렬은 전치하지 않음 (셰이더에서 row_major로 받음)
 
+// 큐브 격자: kGridSize × kGridSize개를 XZ 평면에 kGridSpacing 간격으로 배치
+static constexpr UINT  kGridSize     = 10;
+static constexpr UINT  kNumInstances = kGridSize * kGridSize;
+static constexpr float kGridSpacing  = 2.0f;
+
+// View * Projection (프레임당 한 번, 모든 인스턴스가 공유)
+static XMFLOAT4X4 ComputeViewProj(const Camera& camera, float aspectRatio)
+{
 	// View: 월드 → 카메라. Projection: 카메라 → 클립 공간
 	XMMATRIX view = camera.ViewMatrix();
 	XMMATRIX proj = camera.ProjectionMatrix(aspectRatio);
 
-	// 행 벡터 규약: v * World * View * Proj
-	XMMATRIX mvp = world * view * proj;
-
 	XMFLOAT4X4 result;
-	//XMStoreFloat4x4(&result, XMMatrixTranspose(mvp));
-	XMStoreFloat4x4(&result, mvp);
+	XMStoreFloat4x4(&result, view * proj);
 	return result;
+}
+
+// 인스턴스마다 World 행렬 계산. x는 가운데 정렬, z는 원점에서 앞쪽(+Z)으로 늘어놓음
+// 큐브마다 회전 위상을 조금씩 다르게 해서 각자 다른 각도로 돌게 함
+static void BuildInstances(float angleRadians, InstanceData* out)
+{
+	const float halfWidth = (kGridSize - 1) * kGridSpacing * 0.5f;
+
+	for (UINT z = 0; z < kGridSize; ++z)
+	{
+		for (UINT x = 0; x < kGridSize; ++x)
+		{
+			const UINT  index = z * kGridSize + x;
+			const float phase = static_cast<float>(index) * 0.15f;
+
+			// 행 벡터 규약: v * Rotation * Translation (제자리에서 돌고 → 격자 위치로 이동)
+			XMMATRIX world = XMMatrixRotationY(angleRadians + phase)
+				* XMMatrixTranslation(x * kGridSpacing - halfWidth, 0.0f, z * kGridSpacing);
+			XMStoreFloat4x4(&out[index].World, world);
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -113,14 +134,17 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 	RootSignature  rootSignature;
 	BasicPipeline  basicPipeline;
 	Camera         camera;
+	InstanceBuffer instanceBuffer;
 
 	float cubeAngle = 0.0f; // 라디안
+	InstanceData instances[kNumInstances];
 
 	int exitCode = 0;
 	try
 	{
 		gfx.Init(hwnd);
 		cube.Init(gfx.Device());
+		instanceBuffer.Init(gfx.Device(), GraphicsDevice::kNumFramesInFlight, kNumInstances);
 		rootSignature.Init(gfx.Device());
 
 		// 이 부분은 PSO(Pipeline State Object)를 만드는 호출
@@ -149,22 +173,30 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 			imgui.BeginFrame();
 			controlPanel.Draw(gfx.Width(), gfx.Height(), camera);
 
-			// 업데이트: 카메라 이동 / 회전, 큐브 회전 각도 누적 → MVP 계산
+			// 업데이트: 카메라 이동 / 회전, 큐브 회전 각도 누적 → ViewProj / 인스턴스 World 계산
 			const float deltaTime = ImGui::GetIO().DeltaTime;
 			camera.Update(deltaTime);
 			cubeAngle += XMConvertToRadians(controlPanel.RotationSpeed()) * deltaTime;
 			const float aspectRatio = static_cast<float>(gfx.Width()) / static_cast<float>(gfx.Height());
-			const XMFLOAT4X4 mvp = ComputeCubeMvp(cubeAngle, camera, aspectRatio);
+			const XMFLOAT4X4 viewProj = ComputeViewProj(camera, aspectRatio);
+			BuildInstances(cubeAngle, instances);
 
 			ID3D12GraphicsCommandList* commandList = gfx.BeginFrame(controlPanel.ClearColor());
+
+			// 인스턴스 데이터 업로드. BeginFrame이 이 프레임 번호의 GPU 작업이 끝나길 기다렸으므로
+			// 이제 이 프레임 번호의 버퍼를 덮어써도 안전함
+			const D3D12_GPU_VIRTUAL_ADDRESS instanceAddress = instanceBuffer.Upload(gfx.FrameIndex(), instances, kNumInstances);
+
 			// 큐브 드로우: 틀(루트 시그니처) → 처리 방법(PSO) → 데이터(버퍼) → 그리기
 			commandList->SetGraphicsRootSignature(rootSignature.Get());
 			commandList->SetPipelineState(basicPipeline.Get());
-			commandList->SetGraphicsRoot32BitConstants(RootSignature::kTransformParam, 16, &mvp, 0);
+			commandList->SetGraphicsRoot32BitConstants(RootSignature::kViewProjParam, 16, &viewProj, 0);
+			commandList->SetGraphicsRootShaderResourceView(RootSignature::kInstanceParam, instanceAddress);
 			commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 			commandList->IASetVertexBuffers(0, 1, &cube.VertexBufferView());
 			commandList->IASetIndexBuffer(&cube.IndexBufferView());
-			commandList->DrawIndexedInstanced(cube.IndexCount(), 1, 0, 0, 0);
+			// 같은 큐브 메시를 kNumInstances번 반복. 반복마다 VS의 SV_InstanceID가 0, 1, 2, ...
+			commandList->DrawIndexedInstanced(cube.IndexCount(), kNumInstances, 0, 0, 0);
 
 			imgui.Render(commandList);
 			gfx.EndFrame();
@@ -181,6 +213,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 	// 직접 만든 파이프라인 리소스 해제 (GPU 대기 후, gfx.Shutdown 이전에)
 	basicPipeline.Shutdown();
 	rootSignature.Shutdown();
+	instanceBuffer.Shutdown();
 	cube.Shutdown();
 	gfx.Shutdown();
 	DestroyAppWindow(hwnd, hInstance);

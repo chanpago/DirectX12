@@ -17,6 +17,7 @@
     <ClCompile Include="RootSignature.cpp" />
     <ClCompile Include="BasicPipeline.cpp" />
     <ClCompile Include="Camera.cpp" />
+    <ClCompile Include="InstanceBuffer.cpp" />
     <ClCompile Include="imgui\imgui.cpp">
       <Filter>imgui</Filter>
     </ClCompile>
@@ -48,6 +49,7 @@
     <ClInclude Include="RootSignature.h" />
     <ClInclude Include="BasicPipeline.h" />
     <ClInclude Include="Camera.h" />
+    <ClInclude Include="InstanceBuffer.h" />
     <ClInclude Include="imgui\imconfig.h">
       <Filter>imgui</Filter>
     </ClInclude>

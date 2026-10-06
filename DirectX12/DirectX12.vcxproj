@@ -102,6 +102,7 @@
     <ClCompile Include="RootSignature.cpp" />
     <ClCompile Include="BasicPipeline.cpp" />
     <ClCompile Include="Camera.cpp" />
+    <ClCompile Include="InstanceBuffer.cpp" />
     <ClCompile Include="imgui\imgui.cpp" />
     <ClCompile Include="imgui\imgui_demo.cpp" />
     <ClCompile Include="imgui\imgui_draw.cpp" />
@@ -119,6 +120,7 @@
     <ClInclude Include="RootSignature.h" />
     <ClInclude Include="BasicPipeline.h" />
     <ClInclude Include="Camera.h" />
+    <ClInclude Include="InstanceBuffer.h" />
     <ClInclude Include="imgui\imconfig.h" />
     <ClInclude Include="imgui\imgui.h" />
     <ClInclude Include="imgui\imgui_impl_dx12.h" />
