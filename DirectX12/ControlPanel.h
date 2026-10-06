@@ -2,12 +2,14 @@
 
 #include "D3DUtil.h"
 
+class Camera;
+
 // 매 프레임 그리는 ImGui 컨트롤 패널과, UI로 조절하는 값
 class ControlPanel
 {
 public:
-	// ImGuiLayer::BeginFrame 이후에 호출
-	void Draw(UINT backBufferWidth, UINT backBufferHeight);
+	// ImGuiLayer::BeginFrame 이후에 호출. 카메라 설정도 이 창 안에 그림
+	void Draw(UINT backBufferWidth, UINT backBufferHeight, Camera& camera);
 
 	const float* ClearColor() const { return m_clearColor; }
 	float        RotationSpeed() const { return m_rotationSpeed; } // 도/초

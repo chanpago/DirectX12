@@ -1,8 +1,10 @@
 ﻿#include "ControlPanel.h"
 
+#include "Camera.h"
+
 #include "imgui.h"
 
-void ControlPanel::Draw(UINT backBufferWidth, UINT backBufferHeight)
+void ControlPanel::Draw(UINT backBufferWidth, UINT backBufferHeight, Camera& camera)
 {
 	ImGuiIO& io = ImGui::GetIO();
 
@@ -13,6 +15,7 @@ void ControlPanel::Draw(UINT backBufferWidth, UINT backBufferHeight)
 	ImGui::ColorEdit3("Clear Color", m_clearColor); // 알파(m_clearColor[3])는 1로 고정
 	ImGui::SliderFloat("Rotation (deg/s)", &m_rotationSpeed, 0.0f, 360.0f);
 	ImGui::Checkbox("Show ImGui Demo Window", &m_showDemoWindow);
+	camera.DrawImGui();
 	ImGui::End();
 
 	if (m_showDemoWindow)

@@ -77,6 +77,7 @@ void ImGuiLayer::Init(HWND hwnd, ID3D12Device* device, ID3D12CommandQueue* comma
 	ImGui::CreateContext();
 	ImGuiIO& io = ImGui::GetIO();
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+	io.ConfigNavCaptureKeyboard = false; // 창 포커스만으로는 키보드를 뺏지 않음 (카메라 WASD가 막히지 않게)
 
 	ImGui::StyleColorsDark();
 	ImGuiStyle& style = ImGui::GetStyle();

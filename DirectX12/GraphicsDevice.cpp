@@ -283,18 +283,30 @@ ID3D12GraphicsCommandList* GraphicsDevice::BeginFrame(const float clearColor[4])
 
 void GraphicsDevice::EndFrame()
 {
+	// 이번 프레임에 그린 백 버퍼를 꺼냄 
 	ID3D12Resource* backBuffer = m_backBuffers[m_currentBackBuffer].Get();
+
+	// 렌더 타겟 : gpu가 그림을 그려넣는 대상의 이미지. 픽셀셰이더가 계산한 색이 최종적으로 여기에 써짐. 지금 코드에서는 스왑체인의 백버퍼가 렌더타겟
+	// beginframe의 OMSetRenderTargets가 이번에 이 백버퍼에 그려라라고 지정함
+
+	// present : 다 그린 이미지를 화면에 내보내는것 스왑체인의 present가 그일을 함. present상태는 그리기가 끝났고 화면에 내보낼 준비가 된 상태
 	D3D12_RESOURCE_BARRIER toPresent = TransitionBarrier(backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
 	m_commandList->ResourceBarrier(1, &toPresent);
+
+	// 이 프레임의 명령은 어기까지. 리스트를 닫음
 	ThrowIfFailed(m_commandList->Close(), "CommandList::Close");
 
+	// gpu에 제출. 커맨드 큐에 리스트를 넣음 
 	ID3D12CommandList* lists[] = { m_commandList.Get() };
 	m_commandQueue->ExecuteCommandLists(1, lists);
 
+	// 화면에 표시요청 "이 백버퍼를 화면에 보여주고, 다음 백버퍼로 넘겨라" 라는 요청 이것도 큐에 들어가서 그리기 작업이 끝나고 처리됨
 	HRESULT hr = m_swapChain->Present(1, 0); // VSync
 	m_swapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
 	ThrowIfFailed(hr, "Present");
 
+	// 펜스로 이 프레임 완료 표시 예약
+	// signal로 큐에 앞의 작업이 다 끝나면 펜스값을 이 번호로 바꿔라 라는 명령을 넣음
 	UINT64 fenceValue = ++m_fenceLastSignaledValue;
 	ThrowIfFailed(m_commandQueue->Signal(m_fence.Get(), fenceValue), "Signal");
 	m_currentFrame->FenceValue = fenceValue;

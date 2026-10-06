@@ -10,6 +10,7 @@
 #include "Mesh.h"
 #include "RootSignature.h"
 #include "BasicPipeline.h"
+#include "Camera.h"
 
 using namespace DirectX;
 
@@ -22,21 +23,16 @@ static UINT g_resizeHeight = 0;
 // ---------------------------------------------------------------------------
 // 렌더링
 // ---------------------------------------------------------------------------
-// 큐브의 MVP 행렬 (셰이더로 넘기기 위해 전치된 상태로 반환)
+// 큐브의 MVP 행렬 (전치하지 않음. 셰이더의 g_mvp가 row_major라 그대로 읽음)
 // 왼손 좌표계, Y-up, +Z 앞쪽
-static XMFLOAT4X4 ComputeCubeMvp(float angleRadians, float aspectRatio)
+static XMFLOAT4X4 ComputeCubeMvp(float angleRadians, const Camera& camera, float aspectRatio)
 {
 	// Model(World): 로컬 → 월드. Y축으로 회전
 	XMMATRIX world = XMMatrixRotationY(angleRadians);
 
-	// View: 월드 → 카메라. 앞쪽(-Z) 약간 위에서 원점을 바라봄
-	XMVECTOR eye    = XMVectorSet(0.0f, 1.5f, -3.0f, 1.0f);
-	XMVECTOR target = XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f);
-	XMVECTOR up     = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
-	XMMATRIX view = XMMatrixLookAtLH(eye, target, up);
-
-	// Projection: 카메라 → 클립 공간. 세로 시야각 45도, 화면 비율, near / far
-	XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PIDIV4, aspectRatio, 0.1f, 100.0f);
+	// View: 월드 → 카메라. Projection: 카메라 → 클립 공간
+	XMMATRIX view = camera.ViewMatrix();
+	XMMATRIX proj = camera.ProjectionMatrix(aspectRatio);
 
 	// 행 벡터 규약: v * World * View * Proj
 	XMMATRIX mvp = world * view * proj;
@@ -116,6 +112,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 	Mesh           cube;
 	RootSignature  rootSignature;
 	BasicPipeline  basicPipeline;
+	Camera         camera;
 
 	float cubeAngle = 0.0f; // 라디안
 
@@ -150,12 +147,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 			}
 
 			imgui.BeginFrame();
-			controlPanel.Draw(gfx.Width(), gfx.Height());
+			controlPanel.Draw(gfx.Width(), gfx.Height(), camera);
 
-			// 업데이트: 회전 각도 누적 → MVP 계산
-			cubeAngle += XMConvertToRadians(controlPanel.RotationSpeed()) * ImGui::GetIO().DeltaTime;
+			// 업데이트: 카메라 이동 / 회전, 큐브 회전 각도 누적 → MVP 계산
+			const float deltaTime = ImGui::GetIO().DeltaTime;
+			camera.Update(deltaTime);
+			cubeAngle += XMConvertToRadians(controlPanel.RotationSpeed()) * deltaTime;
 			const float aspectRatio = static_cast<float>(gfx.Width()) / static_cast<float>(gfx.Height());
-			const XMFLOAT4X4 mvp = ComputeCubeMvp(cubeAngle, aspectRatio);
+			const XMFLOAT4X4 mvp = ComputeCubeMvp(cubeAngle, camera, aspectRatio);
 
 			ID3D12GraphicsCommandList* commandList = gfx.BeginFrame(controlPanel.ClearColor());
 			// 큐브 드로우: 틀(루트 시그니처) → 처리 방법(PSO) → 데이터(버퍼) → 그리기
