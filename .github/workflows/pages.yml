@@ -1,0 +1,47 @@
+# docs/ 학습 노트를 GitHub Pages로 배포
+# - main에 push하면 docs/ 아래 날짜 폴더(YYYY-MM-DD)를 훑어 목록(docs/index.html)을 다시 만들고 배포
+# - 새 노트는 docs/<날짜>/index.html 만 추가해서 push하면 됨
+name: Deploy notes to Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "tools/build_notes_index.py"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build notes index
+        run: python tools/build_notes_index.py
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
