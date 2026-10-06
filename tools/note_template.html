@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__ · __DATE__</title>
+<meta name="description" content="__DESC__">
+<meta name="note-title" content="__TITLE__">
+<meta name="note-tags" content="__TAGS__">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" id="hl-light" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+<link rel="stylesheet" id="hl-dark" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="theme-toggle" type="button" aria-label="테마 바꾸기">테마</button>
+
+<div class="layout">
+<nav class="sidebar" aria-label="목차">
+	<a class="home" href="../">← 전체 노트</a>
+	<div class="date">__DATE__</div>
+	<ol>
+	</ol>
+</nav>
+
+<main>
+<div class="content">
+
+<header class="page-head">
+	<div class="eyebrow">DirectX 12 학습 노트 · __DATE__</div>
+	<h1>__TITLE__</h1>
+	<p class="lead">__DESC__</p>
+</header>
+
+<!--CHAPTERS-END: 새 장(section)은 이 줄 바로 위에 추가 (형식은 tools/build_note.py 참고)-->
+
+</div>
+</main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+(function () {
+	// 코드 하이라이트
+	if (window.hljs) {
+		document.querySelectorAll('pre code').forEach(function (el) { window.hljs.highlightElement(el); });
+	}
+
+	// 복사 버튼
+	document.querySelectorAll('.codeblock .copy').forEach(function (btn) {
+		btn.addEventListener('click', function () {
+			var code = btn.closest('.codeblock').querySelector('code').innerText;
+			var done = function () { btn.textContent = '복사됨'; setTimeout(function () { btn.textContent = '복사'; }, 1200); };
+			if (navigator.clipboard) navigator.clipboard.writeText(code).then(done, function () {});
+		});
+	});
+
+	// 테마 토글 (브라우저에만 기억)
+	var root = document.documentElement;
+	var light = document.getElementById('hl-light');
+	var dark = document.getElementById('hl-dark');
+	function applyTheme(t) {
+		if (t === 'light' || t === 'dark') {
+			root.setAttribute('data-theme', t);
+			light.media = t === 'light' ? 'all' : 'not all';
+			dark.media = t === 'dark' ? 'all' : 'not all';
+		} else {
+			root.removeAttribute('data-theme');
+			light.media = '(prefers-color-scheme: light)';
+			dark.media = '(prefers-color-scheme: dark)';
+		}
+	}
+	var saved = null;
+	try { saved = localStorage.getItem('dx12-notes-theme'); } catch (e) {}
+	applyTheme(saved);
+	document.querySelector('.theme-toggle').addEventListener('click', function () {
+		var isDark = root.getAttribute('data-theme') === 'dark' ||
+			(!root.getAttribute('data-theme') && window.matchMedia('(prefers-color-scheme: dark)').matches);
+		var next = isDark ? 'light' : 'dark';
+		applyTheme(next);
+		try { localStorage.setItem('dx12-notes-theme', next); } catch (e) {}
+	});
+
+	// 목차 현재 위치 표시
+	var links = {};
+	document.querySelectorAll('.sidebar a[href^="#"]').forEach(function (a) { links[a.getAttribute('href').slice(1)] = a; });
+	if ('IntersectionObserver' in window) {
+		var obs = new IntersectionObserver(function (entries) {
+			entries.forEach(function (en) {
+				if (en.isIntersecting && links[en.target.id]) {
+					Object.keys(links).forEach(function (k) { links[k].classList.remove('active'); });
+					links[en.target.id].classList.add('active');
+				}
+			});
+		}, { rootMargin: '-10% 0px -80% 0px' });
+		document.querySelectorAll('section.chapter').forEach(function (s) { obs.observe(s); });
+	}
+})();
+</script>
+</body>
+</html>
