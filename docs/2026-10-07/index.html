@@ -1,0 +1,1974 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>카메라와 인스턴싱 · 2026-10-07</title>
+<meta name="description" content="DirectX 12 학습 노트: 카메라 이동, 뷰 행렬, 루트 상수와 상수 버퍼, 인스턴싱 구현, 공용 VB/IB, ExecuteIndirect, UPLOAD 힙과 Map">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" id="hl-light" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+<link rel="stylesheet" id="hl-dark" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="theme-toggle" type="button" aria-label="테마 바꾸기">테마</button>
+
+<div class="layout">
+<nav class="sidebar" aria-label="목차">
+	<a class="home" href="../">← 전체 노트</a>
+	<div class="date">2026-10-07</div>
+	<ol>
+		<li><a href="#overview">0. 한눈에 보기</a></li>
+		<li><a href="#camera">1. 카메라 이동 처리</a></li>
+		<li><a href="#wasd">2. WASD가 막히던 문제</a></li>
+		<li><a href="#view">3. 뷰 행렬 = 카메라의 역변환</a></li>
+		<li><a href="#path">4. 카메라 행렬이 셰이더까지</a></li>
+		<li><a href="#rootargs">5. 커맨드 리스트와 루트 인자</a></li>
+		<li><a href="#binding">6. 루트 상수 · 루트 디스크립터 · 테이블</a></li>
+		<li><a href="#scale">7. 그릴 것이 많아질 때</a></li>
+		<li><a href="#techniques">8. 여러 개를 그리는 4가지 방법</a></li>
+		<li><a href="#instancing">9. 인스턴싱의 원리</a></li>
+		<li><a href="#impl">10. 인스턴싱 구현 diff</a></li>
+		<li><a href="#transform">11. 위치와 회전은 어디서?</a></li>
+		<li><a href="#shared">12. 공용 VB/IB + 오프셋</a></li>
+		<li><a href="#indirect">13. ExecuteIndirect</a></li>
+		<li><a href="#heaps">14. UPLOAD / DEFAULT 힙</a></li>
+		<li><a href="#map">15. Map의 의미</a></li>
+		<li><a href="#next">16. 정리와 다음 단계</a></li>
+	</ol>
+</nav>
+
+<main>
+<div class="content">
+
+<header class="page-head">
+	<div class="eyebrow">DirectX 12 학습 노트 · 2026-10-07</div>
+	<h1>카메라부터 인스턴싱까지</h1>
+	<p class="lead">직접 만든 1인칭 카메라가 어떻게 움직이고, 그 결과가 어떤 경로로 셰이더까지 가는지 따라가 봤다. 그다음 큐브 1개를 100개로 늘리면서 인스턴싱을 구현했고, 그 과정에서 나온 루트 인자, 힙, Map에 대한 질문들을 정리했다.</p>
+</header>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="overview">
+<h2><span class="num">0</span>한눈에 보기</h2>
+
+<figure>
+	<img src="img/instancing-100.png" alt="10×10 격자로 배치된 큐브 100개가 각자 다른 각도로 회전하는 화면. 왼쪽 위에 ImGui 컨트롤 패널과 카메라 설정이 보인다.">
+	<figcaption>최종 결과: <code>DrawIndexedInstanced</code> 한 번으로 그린 큐브 100개 (144 FPS)</figcaption>
+</figure>
+
+<div class="summary-grid">
+	<div class="card"><b><a href="#camera">카메라</a></b>yaw/pitch로 시선을 돌리고, 수평 forward/right와 월드 up으로 WASD/E/Q 이동. <code>XMMatrixLookToLH</code>로 뷰 행렬을 만든다.</div>
+	<div class="card"><b><a href="#wasd">버그 수정</a></b>ImGui 키보드 내비게이션 때문에 창에 포커스만 있어도 WASD가 막혔다. <code>io.ConfigNavCaptureKeyboard = false</code>로 해결.</div>
+	<div class="card"><b><a href="#binding">바인딩 개념</a></b>루트 상수는 값 복사, 루트 디스크립터는 주소, 디스크립터 테이블은 힙 위치. 루트 시그니처는 값 없는 배치도.</div>
+	<div class="card"><b><a href="#impl">인스턴싱 구현</a></b>MVP를 viewProj(루트 상수)와 World 100개(StructuredBuffer, 루트 SRV)로 나누고, <code>SV_InstanceID</code>로 자기 행렬을 찾게 했다.</div>
+	<div class="card"><b><a href="#indirect">확장 기법</a></b>다른 메시는 공용 VB/IB와 오프셋으로, 대량의 오브젝트는 ExecuteIndirect와 GPU 컬링으로 처리한다.</div>
+	<div class="card"><b><a href="#map">메모리</a></b>UPLOAD 힙은 Map한 채로 둬도 된다. Map은 이미 있는 물리 메모리에 CPU 가상 주소를 연결하는 것이다.</div>
+</div>
+
+<div class="callout">
+	<span class="label">이 페이지의 코드</span>
+	아래 코드 블록은 모두 이 날 기준 저장소의 실제 파일과 <code>git diff</code>에서 그대로 가져온 것이다. 경로 옆의 <code>L시작–끝</code>은 해당 파일의 줄 번호다.
+</div>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="camera">
+<h2><span class="num">1</span>카메라 이동은 어떻게 처리되나</h2>
+
+<p class="qa">지금 이 프로젝트에서 카메라 구현이 완료되었는데, 카메라 이동이 어떻게 처리되고 있지?</p>
+
+<p>카메라 이동은 <code>Camera::Update(deltaTime)</code>이 처리하고, <code>main.cpp</code>가 매 프레임 호출한다. 입력은 Win32 메시지를 직접 받지 않고 <strong>ImGui IO</strong>에서 읽는다.</p>
+
+<h3>1-1. 프레임 흐름</h3>
+<div class="codeblock"><div class="cb-head"><span>main.cpp 프레임 루프 (요약)</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">imgui.BeginFrame();                 // ImGui가 이번 프레임 입력 상태를 갱신
+controlPanel.Draw(..., camera);     // 패널 안에 카메라 UI (위치/속도/FOV/Reset)
+camera.Update(deltaTime);           // ← 이동/회전 처리
+// → camera.ViewMatrix(), camera.ProjectionMatrix(aspect) 로 행렬을 만들어 셰이더에 넘김</code></pre></div>
+<p><code>deltaTime</code>은 <code>ImGui::GetIO().DeltaTime</code>(초 단위)을 쓴다.</p>
+
+<h3>1-2. 카메라 상태</h3>
+<div class="table-wrap"><table>
+	<tr><th>멤버</th><th>의미</th></tr>
+	<tr><td><code>m_position</code></td><td>월드 위치</td></tr>
+	<tr><td><code>m_yaw</code></td><td>Y축 기준 회전(라디안). 0이면 +Z를 보고, 커지면 오른쪽으로 돈다</td></tr>
+	<tr><td><code>m_pitch</code></td><td>위/아래 각도. ±89도로 제한</td></tr>
+	<tr><td><code>m_moveSpeed</code>, <code>m_mouseSensitivity</code>, <code>m_fovDegrees</code>, <code>m_nearZ</code>, <code>m_farZ</code></td><td>이동 속도, 마우스 감도, 시야각, 투영 범위</td></tr>
+</table></div>
+<p>방향 벡터는 따로 저장하지 않는다. 필요할 때마다 yaw/pitch로 계산한다.</p>
+
+<div class="codeblock"><div class="cb-head"><span>DirectX12/Camera.cpp  L32–36</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">XMVECTOR Camera::Forward() const
+{
+	const float cosPitch = std::cos(m_pitch);
+	return XMVectorSet(cosPitch * std::sin(m_yaw), std::sin(m_pitch), cosPitch * std::cos(m_yaw), 0.0f);
+}</code></pre></div>
+
+<h3>1-3. 시선 회전</h3>
+<ul>
+	<li>마우스 오른쪽 버튼을 누른 채로 있고, ImGui 창이 마우스를 쓰고 있지 않을 때(<code>!io.WantCaptureMouse</code>)만 동작한다.</li>
+	<li><code>yaw += MouseDelta.x * 감도</code>, <code>pitch -= MouseDelta.y * 감도</code>. 화면 y는 아래로 갈수록 커지므로 부호를 뒤집는다.</li>
+	<li>pitch를 ±89도로 제한하는 이유: 90도가 되면 forward와 up이 평행해져서 <code>LookTo</code> 계산이 깨진다.</li>
+	<li>오른쪽 버튼을 누른 채로 휠을 돌리면 <code>moveSpeed *= 1.2^wheel</code>로 이동 속도가 바뀐다(0.5~20). 더하기가 아니라 곱하기라서 느릴 때도 세밀하게 조절된다.</li>
+</ul>
+
+<h3>1-4. 이동</h3>
+<ul>
+	<li>ImGui가 키보드를 쓰는 중이면(<code>WantCaptureKeyboard</code>) 바로 return한다.</li>
+	<li>이동 기준 축은 <strong>yaw만으로 만든 수평 벡터</strong>다. forward = <code>(sin yaw, 0, cos yaw)</code>, right = <code>(cos yaw, 0, -sin yaw)</code>, up = 월드 <code>(0, 1, 0)</code>.</li>
+	<li>W/S/D/A/E/Q 입력에 맞춰 위 벡터들을 <code>move</code>에 더하거나 뺀 뒤 <strong>정규화</strong>한다. 그래서 대각선으로 가도 빨라지지 않는다.</li>
+	<li><code>position += normalize(move) * speed * deltaTime</code>. 이동 거리가 시간에 비례하므로 프레임레이트와 상관없이 속도가 같다. Left Shift를 누르면 3배.</li>
+</ul>
+
+<div class="codeblock"><div class="cb-head"><span>DirectX12/Camera.cpp  L38–80</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">void Camera::Update(float deltaTime)
+{
+	const ImGuiIO&amp; io = ImGui::GetIO();
+
+	// 1. 시선 회전: 오른쪽 버튼 드래그. 마우스가 오른쪽(+x)이면 오른쪽, 아래(+y)면 아래를 봄
+	if (!io.WantCaptureMouse &amp;&amp; ImGui::IsMouseDown(ImGuiMouseButton_Right))
+	{
+		m_yaw += io.MouseDelta.x * m_mouseSensitivity;
+		m_pitch -= io.MouseDelta.y * m_mouseSensitivity;
+		m_pitch = std::clamp(m_pitch, -kMaxPitch, kMaxPitch);
+
+		// 드래그 중 휠: 한 칸에 20%씩 빠르게 / 느리게 (곱으로 바꿔야 느릴 때도 세밀하게 조절됨)
+		if (io.MouseWheel != 0.0f)
+		{
+			m_moveSpeed *= std::pow(1.2f, io.MouseWheel);
+			m_moveSpeed = std::clamp(m_moveSpeed, kMinMoveSpeed, kMaxMoveSpeed);
+		}
+	}
+
+	// 2. 이동: 수평 방향(forward의 xz)과 오른쪽, 월드 위쪽 기준
+	if (io.WantCaptureKeyboard)
+		return;
+
+	const XMVECTOR forward = XMVectorSet(std::sin(m_yaw), 0.0f, std::cos(m_yaw), 0.0f);
+	const XMVECTOR right = XMVectorSet(std::cos(m_yaw), 0.0f, -std::sin(m_yaw), 0.0f);
+	const XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+
+	XMVECTOR move = XMVectorZero();
+	if (ImGui::IsKeyDown(ImGuiKey_W)) move += forward;
+	if (ImGui::IsKeyDown(ImGuiKey_S)) move -= forward;
+	if (ImGui::IsKeyDown(ImGuiKey_D)) move += right;
+	if (ImGui::IsKeyDown(ImGuiKey_A)) move -= right;
+	if (ImGui::IsKeyDown(ImGuiKey_E)) move += up;
+	if (ImGui::IsKeyDown(ImGuiKey_Q)) move -= up;
+
+	// 대각선으로 갈 때 빨라지지 않게 정규화
+	if (XMVectorGetX(XMVector3LengthSq(move)) &gt; 0.0f)
+	{
+		const float speed = m_moveSpeed * (ImGui::IsKeyDown(ImGuiKey_LeftShift) ? 3.0f : 1.0f);
+		const XMVECTOR position = XMLoadFloat3(&amp;m_position) + XMVector3Normalize(move) * speed * deltaTime;
+		XMStoreFloat3(&amp;m_position, position);
+	}
+}</code></pre></div>
+
+<div class="callout key">
+	<span class="label">FPS 스타일 이동</span>
+	위를 보면서 W를 눌러도 위로 날아가지 않고 수평으로만 이동한다. 높이는 E/Q로만 바꾼다. 바라보는 방향 그대로 날아가는 플라이 캠으로 바꾸려면, 이동할 때도 pitch가 들어간 <code>Forward()</code>를 쓰면 된다.
+</div>
+
+<h3>1-5. 뷰 / 투영 행렬</h3>
+<p>회전에는 pitch까지 들어간 <code>Forward()</code>를 쓰고, 이동에는 수평 forward를 쓴다. 이 차이가 위의 FPS 스타일 동작을 만든다.</p>
+<div class="codeblock"><div class="cb-head"><span>DirectX12/Camera.cpp  L82–91</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">XMMATRIX Camera::ViewMatrix() const
+{
+	const XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+	return XMMatrixLookToLH(XMLoadFloat3(&amp;m_position), Forward(), up);
+}
+
+XMMATRIX Camera::ProjectionMatrix(float aspectRatio) const
+{
+	return XMMatrixPerspectiveFovLH(XMConvertToRadians(m_fovDegrees), aspectRatio, m_nearZ, m_farZ);
+}</code></pre></div>
+
+<details class="file">
+	<summary>DirectX12/Camera.h 전체</summary>
+<div class="codeblock"><div class="cb-head"><span>DirectX12/Camera.h</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">#pragma once
+
+#include &quot;D3DUtil.h&quot;
+
+#include &lt;DirectXMath.h&gt;
+
+// 1인칭 자유 이동 카메라 (왼손 / Y-up / +Z 앞쪽)
+// - 마우스 오른쪽 버튼을 누른 채로 드래그: 시선 회전
+// - 오른쪽 버튼을 누른 채로 휠: 이동 속도 조절
+// - WASD: 앞뒤좌우, E / Q: 위아래, Shift: 빠르게
+// 입력은 ImGui IO에서 읽음. ImGui 창이 마우스 / 키보드를 쓰는 중이면 무시
+class Camera
+{
+public:
+	Camera();
+
+	// 매 프레임 ImGuiLayer::BeginFrame 이후에 호출. deltaTime은 초 단위
+	void Update(float deltaTime);
+
+	// 처음 위치 / 방향으로 되돌림
+	void Reset();
+
+	// 월드 → 뷰
+	DirectX::XMMATRIX ViewMatrix() const;
+
+	// 뷰 → 클립. aspectRatio = 너비 / 높이
+	DirectX::XMMATRIX ProjectionMatrix(float aspectRatio) const;
+
+	// 컨트롤 패널 안에서 호출. 카메라 상태 표시 + 설정 조절
+	void DrawImGui();
+
+private:
+	// yaw / pitch로 바라보는 방향 (단위 벡터)
+	DirectX::XMVECTOR Forward() const;
+
+	DirectX::XMFLOAT3 m_position = {};
+	float m_yaw = 0.0f;   // Y축 기준 회전 (라디안). 0 = +Z, 양수 = 오른쪽
+	float m_pitch = 0.0f; // 위아래 (라디안). 양수 = 위
+
+	float m_moveSpeed = 3.0f;          // 초당 이동 거리
+	float m_mouseSensitivity = 0.003f; // 픽셀당 회전 (라디안)
+	float m_fovDegrees = 45.0f;        // 세로 시야각
+	float m_nearZ = 0.1f;
+	float m_farZ = 100.0f;
+};</code></pre></div>
+</details>
+<details class="file">
+	<summary>DirectX12/Camera.cpp 전체</summary>
+<div class="codeblock"><div class="cb-head"><span>DirectX12/Camera.cpp</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">#include &quot;Camera.h&quot;
+
+#include &quot;imgui.h&quot;
+
+#include &lt;algorithm&gt;
+#include &lt;cmath&gt;
+
+using namespace DirectX;
+
+// 처음 위치: 앞쪽(-Z) 약간 위. 원점을 바라보도록 pitch를 아래로
+static const XMFLOAT3 kStartPosition = { 0.0f, 1.5f, -3.0f };
+
+// 위아래로 90도까지 돌리면 forward와 up이 평행해져서 LookTo 계산이 깨짐
+static const float kMaxPitch = XMConvertToRadians(89.0f);
+
+// 이동 속도 범위 (컨트롤 패널 슬라이더와 같음)
+static const float kMinMoveSpeed = 0.5f;
+static const float kMaxMoveSpeed = 20.0f;
+
+Camera::Camera()
+{
+	Reset();
+}
+
+void Camera::Reset()
+{
+	m_position = kStartPosition;
+	m_yaw = 0.0f;
+	m_pitch = -std::atan2(kStartPosition.y, -kStartPosition.z); // 원점을 향하는 각도
+}
+
+XMVECTOR Camera::Forward() const
+{
+	const float cosPitch = std::cos(m_pitch);
+	return XMVectorSet(cosPitch * std::sin(m_yaw), std::sin(m_pitch), cosPitch * std::cos(m_yaw), 0.0f);
+}
+
+void Camera::Update(float deltaTime)
+{
+	const ImGuiIO&amp; io = ImGui::GetIO();
+
+	// 1. 시선 회전: 오른쪽 버튼 드래그. 마우스가 오른쪽(+x)이면 오른쪽, 아래(+y)면 아래를 봄
+	if (!io.WantCaptureMouse &amp;&amp; ImGui::IsMouseDown(ImGuiMouseButton_Right))
+	{
+		m_yaw += io.MouseDelta.x * m_mouseSensitivity;
+		m_pitch -= io.MouseDelta.y * m_mouseSensitivity;
+		m_pitch = std::clamp(m_pitch, -kMaxPitch, kMaxPitch);
+
+		// 드래그 중 휠: 한 칸에 20%씩 빠르게 / 느리게 (곱으로 바꿔야 느릴 때도 세밀하게 조절됨)
+		if (io.MouseWheel != 0.0f)
+		{
+			m_moveSpeed *= std::pow(1.2f, io.MouseWheel);
+			m_moveSpeed = std::clamp(m_moveSpeed, kMinMoveSpeed, kMaxMoveSpeed);
+		}
+	}
+
+	// 2. 이동: 수평 방향(forward의 xz)과 오른쪽, 월드 위쪽 기준
+	if (io.WantCaptureKeyboard)
+		return;
+
+	const XMVECTOR forward = XMVectorSet(std::sin(m_yaw), 0.0f, std::cos(m_yaw), 0.0f);
+	const XMVECTOR right = XMVectorSet(std::cos(m_yaw), 0.0f, -std::sin(m_yaw), 0.0f);
+	const XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+
+	XMVECTOR move = XMVectorZero();
+	if (ImGui::IsKeyDown(ImGuiKey_W)) move += forward;
+	if (ImGui::IsKeyDown(ImGuiKey_S)) move -= forward;
+	if (ImGui::IsKeyDown(ImGuiKey_D)) move += right;
+	if (ImGui::IsKeyDown(ImGuiKey_A)) move -= right;
+	if (ImGui::IsKeyDown(ImGuiKey_E)) move += up;
+	if (ImGui::IsKeyDown(ImGuiKey_Q)) move -= up;
+
+	// 대각선으로 갈 때 빨라지지 않게 정규화
+	if (XMVectorGetX(XMVector3LengthSq(move)) &gt; 0.0f)
+	{
+		const float speed = m_moveSpeed * (ImGui::IsKeyDown(ImGuiKey_LeftShift) ? 3.0f : 1.0f);
+		const XMVECTOR position = XMLoadFloat3(&amp;m_position) + XMVector3Normalize(move) * speed * deltaTime;
+		XMStoreFloat3(&amp;m_position, position);
+	}
+}
+
+XMMATRIX Camera::ViewMatrix() const
+{
+	const XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+	return XMMatrixLookToLH(XMLoadFloat3(&amp;m_position), Forward(), up);
+}
+
+XMMATRIX Camera::ProjectionMatrix(float aspectRatio) const
+{
+	return XMMatrixPerspectiveFovLH(XMConvertToRadians(m_fovDegrees), aspectRatio, m_nearZ, m_farZ);
+}
+
+void Camera::DrawImGui()
+{
+	if (!ImGui::CollapsingHeader(&quot;Camera&quot;, ImGuiTreeNodeFlags_DefaultOpen))
+		return;
+
+	ImGui::TextDisabled(&quot;RMB drag: look, RMB + wheel: speed, WASD: move, E/Q: up/down, Shift: fast&quot;);
+	ImGui::DragFloat3(&quot;Position&quot;, &amp;m_position.x, 0.05f);
+	ImGui::Text(&quot;Yaw %.1f, Pitch %.1f (deg)&quot;, XMConvertToDegrees(m_yaw), XMConvertToDegrees(m_pitch));
+	ImGui::SliderFloat(&quot;Move Speed&quot;, &amp;m_moveSpeed, kMinMoveSpeed, kMaxMoveSpeed);
+	ImGui::SliderFloat(&quot;FOV (deg)&quot;, &amp;m_fovDegrees, 20.0f, 120.0f);
+	if (ImGui::Button(&quot;Reset Camera&quot;))
+		Reset();
+}</code></pre></div>
+</details>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="wasd">
+<h2><span class="num">2</span>WASD가 막히던 문제</h2>
+
+<p class="qa">WASD로 이동은 안 해?</p>
+
+<p>코드는 WASD로 이동하도록 되어 있었지만, 실행하면 키 입력이 무시될 수 있었다. 원인은 <code>Camera::Update</code>의 이 검사다.</p>
+<div class="codeblock"><div class="cb-head"><span>Camera.cpp</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">if (io.WantCaptureKeyboard)
+    return;</code></pre></div>
+
+<p>그리고 <code>ImGuiLayer.cpp</code>에서 키보드 내비게이션을 켜 두었다.</p>
+<div class="codeblock"><div class="cb-head"><span>ImGuiLayer.cpp (수정 전)</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;</code></pre></div>
+
+<p>ImGui 내부(<code>imgui.cpp</code>)를 보면, 내비게이션이 켜져 있으면 <strong>ImGui 창에 포커스만 있어도</strong> <code>WantCaptureKeyboard</code>가 true가 된다. 텍스트 입력 중이 아니어도 마찬가지다.</p>
+<div class="codeblock"><div class="cb-head"><span>DirectX12/imgui/imgui.cpp  L5538–5546</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">    // Update io.WantCaptureKeyboard for the user application (true = dispatch keyboard info to Dear ImGui only, false = dispatch keyboard info to Dear ImGui + underlying app)
+    io.WantCaptureKeyboard = false;
+    if ((io.ConfigFlags &amp; ImGuiConfigFlags_NoKeyboard) == 0)
+    {
+        if ((g.ActiveId != 0) || (modal_window != NULL))
+            io.WantCaptureKeyboard = true;
+        else if (io.NavActive &amp;&amp; (io.ConfigFlags &amp; ImGuiConfigFlags_NavEnableKeyboard) &amp;&amp; io.ConfigNavCaptureKeyboard)
+            io.WantCaptureKeyboard = true;
+    }</code></pre></div>
+<p>두 번째 <code>else if</code>가 문제였다. <code>NavActive</code>(창 포커스)이고 <code>NavEnableKeyboard</code>가 켜져 있고 <code>ConfigNavCaptureKeyboard</code>가 기본값 true면, 위젯을 조작하지 않아도 true가 된다.</p>
+<p>컨트롤 패널은 처음 나타날 때 자동으로 포커스를 받는다. 그래서 실행 직후에는 WASD가 바로 return돼서 무시되었다.</p>
+
+<h3>수정</h3>
+<div class="codeblock"><div class="cb-head"><span>DirectX12/ImGuiLayer.cpp  L79–80</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+	io.ConfigNavCaptureKeyboard = false; // 창 포커스만으로는 키보드를 뺏지 않음 (카메라 WASD가 막히지 않게)</code></pre></div>
+<p>이제 창 포커스만으로는 키보드를 뺏기지 않는다. 텍스트 입력이나 슬라이더 조작처럼 ImGui가 실제로 키보드를 쓰는 동안(<code>ActiveId != 0</code>)에는 여전히 <code>WantCaptureKeyboard</code>가 true라서, 그때는 카메라가 키를 무시한다.</p>
+
+<div class="callout">
+	<span class="label">다른 방법</span>
+	<code>Camera.cpp</code>에서 <code>if (io.WantTextInput) return;</code>으로 텍스트 입력 중일 때만 막는 방법도 있다. 키보드 내비게이션이 필요 없다면 <code>NavEnableKeyboard</code> 줄을 지워도 된다.
+</div>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="view">
+<h2><span class="num">3</span>뷰 행렬 = 카메라 월드 변환의 역행렬</h2>
+
+<p class="qa">그러면 결국 상수 버퍼에 카메라의 이동, 회전을 역으로 취한 값이 행렬값에 들어가는 거지?</p>
+
+<p>맞다. 카메라를 하나의 물체로 보면, 월드 변환은 "회전 R 다음에 위치 p로 이동"이다. 행 벡터 규약으로 쓰면 <code>CameraWorld = R * T(p)</code>. 뷰 행렬은 이것의 역행렬이다.</p>
+<div class="codeblock"><div class="cb-head"><span>수식</span><button class="copy" type="button">복사</button></div><pre><code class="language-plaintext">View = (R * T(p))⁻¹ = T(-p) * Rᵀ</code></pre></div>
+<ul>
+	<li>먼저 <strong>-p만큼 이동</strong>한다. 카메라가 원점에 오도록 세상 전체를 반대로 옮기는 것이다.</li>
+	<li>다음에 <strong>회전을 반대로</strong> 적용한다. 회전 행렬은 직교 행렬이라 역행렬이 전치(Rᵀ)와 같다. 그래서 역행렬을 따로 계산하지 않아도 된다.</li>
+</ul>
+
+<h3><code>XMMatrixLookToLH</code>는 역행렬을 직접 만든다</h3>
+<p>코드에서 <code>Inverse()</code>를 호출하지 않는다. <code>LookToLH</code>가 카메라 축 r(right), u(up), f(forward)와 위치 p로 처음부터 역행렬 모양을 만들어 준다.</p>
+<div class="codeblock"><div class="cb-head"><span>XMMatrixLookToLH 결과 (행 벡터 규약)</span><button class="copy" type="button">복사</button></div><pre><code class="language-plaintext">      r.x    u.x    f.x   0
+      r.y    u.y    f.y   0
+      r.z    u.z    f.z   0
+    -p·r   -p·u   -p·f    1</code></pre></div>
+<ul>
+	<li><strong>위쪽 3×3</strong>: 축을 열로 세운 것 = Rᵀ. 월드 좌표를 카메라 축 방향 성분으로 바꾼다.</li>
+	<li><strong>마지막 행</strong>: 위치를 빼는 이동(-p)을 카메라 축 기준으로 표현한 값.</li>
+</ul>
+<p>r, u, f는 yaw/pitch로 계산한 <code>Forward()</code>와 월드 up에서 나오고, p는 <code>m_position</code>이다. WASD를 누르면 p가 바뀌어 마지막 행이 바뀌고, 마우스를 드래그하면 f가 바뀌어 3×3 부분이 바뀐다.</p>
+
+<div class="callout warn">
+	<span class="label">정확히는 "상수 버퍼"가 아니다</span>
+	이 값은 상수 버퍼 리소스가 아니라 <strong>루트 상수</strong>(32비트 상수 16개)로 넘어간다. 셰이더에서는 <code>cbuffer ... : register(b0)</code>로 읽으니 cbuffer처럼 보이지만, 버퍼 메모리를 따로 만들지 않고 커맨드 리스트에 값을 직접 넣는다. 그리고 셰이더로 넘어가는 건 뷰 행렬 단독이 아니라 다른 행렬과 곱해진 결과다(처음엔 MVP, 인스턴싱 후엔 viewProj).
+</div>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="path">
+<h2><span class="num">4</span>카메라 행렬이 셰이더까지 가는 길</h2>
+
+<p class="qa">그 부분이 지금 어디 있지? 카메라 행렬 적용하는 거</p>
+
+<p>카메라 작업 당시(인스턴싱 전)의 경로는 다음과 같았다.</p>
+<ol>
+	<li><strong>뷰 행렬 생성</strong>: <code>Camera::ViewMatrix()</code>가 <code>XMMatrixLookToLH(m_position, Forward(), up)</code>로 역변환 행렬을 만든다. <code>ProjectionMatrix()</code>는 투영 행렬.</li>
+	<li><strong>MVP로 합치기</strong>: <code>main.cpp</code>의 <code>ComputeCubeMvp()</code>가 <code>world * view * proj</code>를 하나로 곱하고, 전치하지 않고 <code>XMFLOAT4X4</code>에 저장한다.</li>
+	<li><strong>매 프레임 호출</strong>: <code>camera.Update(deltaTime)</code> 다음에 <code>ComputeCubeMvp(...)</code>.</li>
+	<li><strong>GPU로 전달</strong>: <code>SetGraphicsRoot32BitConstants(RootSignature::kTransformParam, 16, &amp;mvp, 0)</code>.</li>
+	<li><strong>셰이더에서 적용</strong>: <code>mul(float4(input.Position, 1.0f), g_mvp)</code>. 정점에 실제로 카메라 행렬이 곱해지는 곳.</li>
+</ol>
+<div class="codeblock"><div class="cb-head"><span>인스턴싱 전 main.cpp (커밋 706aa98)</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">static XMFLOAT4X4 ComputeCubeMvp(float angleRadians, const Camera&amp; camera, float aspectRatio)
+{
+	XMMATRIX world = XMMatrixRotationY(angleRadians);
+	XMMATRIX view = camera.ViewMatrix();
+	XMMATRIX proj = camera.ProjectionMatrix(aspectRatio);
+	XMMATRIX mvp = world * view * proj;   // 행 벡터 규약: v * World * View * Proj
+
+	XMFLOAT4X4 result;
+	XMStoreFloat4x4(&amp;result, mvp);         // 전치 안 함 (셰이더가 row_major)
+	return result;
+}
+...
+commandList-&gt;SetGraphicsRoot32BitConstants(RootSignature::kTransformParam, 16, &amp;mvp, 0);</code></pre></div>
+<p>인스턴싱 이후에는 2번이 <code>ComputeViewProj()</code> + <code>BuildInstances()</code>로 나뉘었다(<a href="#impl">10장</a>).</p>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="rootargs">
+<h2><span class="num">5</span>커맨드 리스트와 루트 인자</h2>
+
+<h3>5-1. <code>SetGraphicsRoot32BitConstants</code>는 영원히 고정 아닌가?</h3>
+<p class="qa">커맨드 리스트의 <code>SetGraphicsRoot32BitConstants(kTransformParam, 16, &amp;mvp, 0)</code> 이 부분은 영원히 고정 아냐?</p>
+<p>호출하는 코드 줄은 같지만, 넘기는 <strong>값은 매 프레임 바뀐다</strong>. 이유는 두 가지다.</p>
+<p><strong>① 커맨드 리스트는 매 프레임 새로 기록한다.</strong> 한 번 만들어 두고 재사용하는 녹화본이 아니다.</p>
+<div class="codeblock"><div class="cb-head"><span>한 프레임</span><button class="copy" type="button">복사</button></div><pre><code class="language-plaintext">gfx.BeginFrame()   → 커맨드 리스트 Reset (이전 기록 지움)
+  ... SetGraphicsRoot32BitConstants(..., &amp;mvp, ...)   ← 이번 프레임 mvp로 다시 기록
+  ... DrawIndexedInstanced(...)
+gfx.EndFrame()     → Close → ExecuteCommandLists → Present</code></pre></div>
+<p><strong>② 루트 상수는 호출하는 순간 값이 복사된다.</strong> <code>&amp;mvp</code>라는 포인터를 넘기지만 GPU가 나중에 그 주소를 읽으러 오는 게 아니다. 호출 시점에 64바이트가 커맨드 리스트 안으로 복사된다. 그래서 <code>mvp</code>가 지역 변수여도 되고, 같은 프레임 안에서 값을 바꿔 가며 여러 번 호출해도 된다.</p>
+<div class="codeblock"><div class="cb-head"><span>같은 프레임에서 두 번</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">SetGraphicsRoot32BitConstants(..., &amp;mvpA, 0); DrawIndexedInstanced(...); // 큐브 A
+SetGraphicsRoot32BitConstants(..., &amp;mvpB, 0); DrawIndexedInstanced(...); // 큐브 B</code></pre></div>
+<p>각 Draw는 그 직전에 설정된 값을 쓴다.</p>
+
+<h3>5-2. <code>kTransformParam</code>은 바인딩 정보를 담고 있나?</h3>
+<p class="qa"><code>RootSignature::kTransformParam</code>은 루트 시그니처에서 셰이더의 몇 번에 바인딩할지의 정보를 가져오는 건가?</p>
+<p>거의 맞지만, <code>kTransformParam</code>은 정보를 <strong>담고 있는</strong> 값이 아니라 정보가 있는 <strong>칸의 번호</strong>다.</p>
+<div class="codeblock"><div class="cb-head"><span>연결 구조</span><button class="copy" type="button">복사</button></div><pre><code class="language-plaintext">kTransformParam (= 루트 파라미터 배열의 인덱스, 0)
+      │
+      ▼
+루트 시그니처의 파라미터[0] 정의    ← 루트 시그니처를 만들 때 정해 둠
+   - 타입: 32비트 상수
+   - 개수: 16
+   - 레지스터: b0, space 0
+   - 보이는 단계: VS
+      │
+      ▼
+셰이더의 cbuffer Transform : register(b0)</code></pre></div>
+<p>"셰이더의 b0와 연결된다"는 정보는 파라미터 정의(<code>ShaderRegister</code>, <code>RegisterSpace</code>, <code>Num32BitValues</code>) 안에 있다. 호출 <code>SetGraphicsRoot32BitConstants(n, 16, &amp;mvp, 0)</code>은 "현재 루트 시그니처의 n번 칸에 값 16개를, 그 칸의 0번째 값부터 채워라"라는 뜻이다.</p>
+
+<h3>5-3. 값은 루트 시그니처가 아니라 커맨드 리스트의 슬롯에 들어간다</h3>
+<p class="qa">이미 <code>SetGraphicsRootSignature</code>로 정해 둔 루트 시그니처에 16개의 mvp 값을 적으라는 명령이야?</p>
+<p>맞다. 표현을 다듬으면, 루트 시그니처 자체에는 값이 없고 <strong>칸의 배치도</strong>일 뿐이다.</p>
+<ul>
+	<li><code>SetGraphicsRootSignature(...)</code>: 이 배치도를 쓴다고 정한다. 커맨드 리스트에 그 배치대로 빈 칸(루트 인자 슬롯)이 생긴다.</li>
+	<li><code>SetGraphicsRoot32BitConstants(...)</code>: 그중 한 칸에 값을 적는다. 다시 호출하면 덮어쓴다.</li>
+	<li><code>DrawIndexedInstanced(...)</code>: 그 순간 칸에 들어 있는 값으로 그린다.</li>
+</ul>
+<div class="callout warn">
+	<span class="label">순서 주의</span>
+	<code>SetGraphicsRootSignature</code>를 호출하면 기존 칸의 값이 <strong>모두 무효</strong>가 된다. 항상 루트 시그니처 설정이 먼저, 값 설정이 그다음이다.
+</div>
+
+<h3>5-4. 커맨드 리스트 하나에 루트 시그니처는 하나뿐?</h3>
+<p>한 시점에는 <strong>그래픽스용 1개 + 컴퓨트용 1개</strong>가 바인딩된다(<code>SetGraphicsRootSignature</code> / <code>SetComputeRootSignature</code>는 서로 독립). 하지만 기록 중간에 여러 번 바꿀 수 있다.</p>
+<div class="codeblock"><div class="cb-head"><span>중간에 교체</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">commandList-&gt;SetGraphicsRootSignature(rootSigA);
+commandList-&gt;SetPipelineState(psoA);                       // A와 호환되는 PSO
+commandList-&gt;SetGraphicsRoot32BitConstants(0, 16, &amp;mvp, 0);
+commandList-&gt;DrawIndexedInstanced(...);                    // A 배치로 그림
+
+commandList-&gt;SetGraphicsRootSignature(rootSigB);           // 교체 → 이전 칸 값 전부 무효
+commandList-&gt;SetPipelineState(psoB);                       // B와 호환되는 PSO
+commandList-&gt;SetGraphicsRootDescriptorTable(...);          // B 배치에 맞춰 다시 채움
+commandList-&gt;DrawIndexedInstanced(...);                    // B 배치로 그림</code></pre></div>
+<p>규칙은 두 가지다. ① 교체하면 루트 인자를 다시 채워야 한다. ② Draw 시점의 PSO가 현재 루트 시그니처와 호환되어야 한다. 교체에도 비용이 들어서, 엔진은 공용 루트 시그니처 몇 개만 두고 같은 것을 쓰는 Draw끼리 모아서 그린다. 실제로 ImGui 백엔드도 그릴 때 자기 루트 시그니처로 바꾼다.</p>
+
+<h3>5-5. Draw 정렬 (sort key)</h3>
+<p>Draw마다 64비트 키를 만들어 정렬하는 방식을 많이 쓴다. 비용이 큰 상태를 상위 비트에 둔다.</p>
+<div class="codeblock"><div class="cb-head"><span>정렬 키</span><button class="copy" type="button">복사</button></div><pre><code class="language-plaintext">[ 패스/레이어 | 불투명·반투명 | 루트 시그니처 | PSO | 머티리얼 | 깊이 ]
+   상위 비트  ─────────────────────────────────────────▶  하위 비트</code></pre></div>
+<ul>
+	<li><strong>불투명</strong>: 상태 기준으로 묶고, 가능하면 앞에서 뒤로. 가까운 물체가 깊이를 먼저 채우면 가려진 픽셀이 Early-Z로 걸러진다.</li>
+	<li><strong>반투명</strong>: 상태와 상관없이 뒤에서 앞으로. 블렌딩은 순서에 따라 결과가 달라진다.</li>
+	<li>실제로 자주 바뀌는 건 PSO와 머티리얼이다. 최근 엔진은 <strong>바인드리스</strong>(거대한 디스크립터 힙 + 인덱스)로 머티리얼 교체 비용을 거의 없앤다.</li>
+</ul>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="binding">
+<h2><span class="num">6</span>루트 상수 · 루트 디스크립터 · 디스크립터 테이블</h2>
+
+<p class="qa">루트 상수랑 상수 버퍼가 뭔 차이임? 그리고 상수 버퍼는 디스크립터 없지 않아?</p>
+
+<p>셋 다 셰이더에서는 똑같이 <code>register(bN)</code> 등으로 읽는다. 차이는 <strong>데이터가 어디 있고 무엇을 넘기느냐</strong>다. 상수 버퍼를 바인딩하는 방법이 두 가지(루트 디스크립터, 디스크립터 테이블)라서 셋으로 나눠 보면 정확하다.</p>
+
+<div class="table-wrap"><table>
+	<tr><th>방식</th><th>루트 시그니처에 들어가는 것</th><th>디스크립터 힙</th><th>비용</th><th>설정 함수</th></tr>
+	<tr><td>루트 상수</td><td>값 자체</td><td>X</td><td>값 1개당 1 DWORD</td><td><code>SetGraphicsRoot32BitConstants</code></td></tr>
+	<tr><td>루트 디스크립터 (CBV/SRV/UAV)</td><td>버퍼 GPU 주소</td><td>X</td><td>2 DWORD</td><td><code>SetGraphicsRootConstantBufferView</code> 등</td></tr>
+	<tr><td>디스크립터 테이블</td><td>힙 안의 디스크립터 위치</td><td>O</td><td>1 DWORD</td><td><code>SetGraphicsRootDescriptorTable</code></td></tr>
+</table></div>
+<p>아래로 갈수록 한 단계씩 더 거쳐서 읽는다(간접 참조 증가). 대신 더 많은 데이터를 묶어 다룰 수 있다. 루트 시그니처 전체 크기는 <strong>64 DWORD</strong>로 제한된다. 지금 MVP 루트 상수는 16 DWORD라서 한도의 1/4을 쓴다.</p>
+
+<h3>루트 상수 vs 상수 버퍼</h3>
+<div class="table-wrap"><table>
+	<tr><th></th><th>루트 상수</th><th>상수 버퍼 (CBV)</th></tr>
+	<tr><td>데이터 위치</td><td>커맨드 리스트에 직접 기록</td><td>별도 GPU 리소스(업로드 힙 등)</td></tr>
+	<tr><td>넘기는 것</td><td>값 (호출 시점 복사)</td><td>GPU 주소 또는 디스크립터</td></tr>
+	<tr><td>크기</td><td>아주 작음 (루트 시그니처 전체 256B)</td><td>최대 64KB, 256바이트 정렬</td></tr>
+	<tr><td>메모리 관리</td><td>필요 없음</td><td>버퍼 생성, Map, 쓰기</td></tr>
+	<tr><td>동기화</td><td>필요 없음</td><td>GPU가 읽는 동안 덮어쓰면 안 됨 → 프레임별 버퍼 + 펜스</td></tr>
+	<tr><td>접근 속도</td><td>가장 빠름</td><td>메모리를 한 번 거침</td></tr>
+	<tr><td>주 용도</td><td>오브젝트마다 바뀌는 작은 값 (MVP, 오브젝트 인덱스)</td><td>크거나 공유되는 데이터 (프레임 상수, 조명, 머티리얼)</td></tr>
+</table></div>
+
+<h3>루트 디스크립터 예시 (힙 불필요)</h3>
+<div class="codeblock"><div class="cb-head"><span>루트 CBV</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">// 루트 시그니처: D3D12_ROOT_PARAMETER_TYPE_CBV
+commandList-&gt;SetGraphicsRootConstantBufferView(paramIndex, buffer-&gt;GetGPUVirtualAddress());</code></pre></div>
+<h3>디스크립터 테이블 예시 (CBV 디스크립터 필요)</h3>
+<div class="codeblock"><div class="cb-head"><span>디스크립터 테이블</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">// CBV_SRV_UAV 타입 디스크립터 힙에 CBV를 만듦
+D3D12_CONSTANT_BUFFER_VIEW_DESC desc = { buffer-&gt;GetGPUVirtualAddress(), 256 };
+device-&gt;CreateConstantBufferView(&amp;desc, cpuHandle);
+
+// 루트 시그니처: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE
+commandList-&gt;SetDescriptorHeaps(...);
+commandList-&gt;SetGraphicsRootDescriptorTable(paramIndex, gpuHandle);</code></pre></div>
+<div class="callout">
+	<span class="label">텍스처는 테이블만</span>
+	텍스처(SRV)는 루트 디스크립터로 바인딩할 수 없어서 반드시 디스크립터 테이블을 거친다. 반면 <strong>버퍼 SRV는 루트 디스크립터로 가능</strong>하다. 이번 인스턴싱 구현이 이 방식(루트 SRV)을 쓴다.
+</div>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="scale">
+<h2><span class="num">7</span>그릴 것이 많아질 때</h2>
+
+<p class="qa">지금은 큐브 하나라 <code>ComputeCubeMvp</code> 하나로 퉁쳐지는데, 렌더링할 요소가 많아지면 이 구조보다 더 많아져야 하는 거 아냐?</p>
+
+<p>맞다. 핵심은 <strong>얼마나 자주 바뀌는 값인지에 따라 분리</strong>하는 것이다.</p>
+<ul>
+	<li><code>view * proj</code>: 카메라로 정해진다. <strong>프레임당 한 번</strong> 계산하고 모든 오브젝트가 공유한다.</li>
+	<li><code>world</code>: <strong>오브젝트마다</strong> 다르다.</li>
+</ul>
+<div class="codeblock"><div class="cb-head"><span>분리된 구조</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">// 프레임당 한 번
+XMMATRIX viewProj = camera.ViewMatrix() * camera.ProjectionMatrix(aspect);
+
+// 오브젝트마다
+for (const RenderItem&amp; item : renderItems)
+{
+    XMMATRIX mvp = item.World() * viewProj;
+    // mvp를 셰이더로 넘기고, item.mesh 바인딩 후 Draw
+}</code></pre></div>
+
+<h3>셰이더로 넘기는 방식도 단계적으로 바뀐다</h3>
+<div class="table-wrap"><table>
+	<tr><th>단계</th><th>구조</th><th>적합한 규모</th></tr>
+	<tr><td>1</td><td>지금 방식 그대로 for문: 루트 상수 설정 → Draw</td><td>수십 개</td></tr>
+	<tr><td>2</td><td>프레임 상수 버퍼(viewProj, 카메라 위치, 시간) + 오브젝트 루트 상수(world)</td><td>조명 도입 시 (월드 좌표가 필요)</td></tr>
+	<tr><td>3</td><td>오브젝트 상수 버퍼 배열 / 인스턴싱(StructuredBuffer + <code>SV_InstanceID</code>)</td><td>수백~수천 개</td></tr>
+</table></div>
+
+<h3>메시가 다르면?</h3>
+<p class="qa">같은 메시가 아니라면 for문 돌려서 world 행렬 바꿔 가면서 DrawIndexedInstanced로 제출한다는 거지?</p>
+<p>기본은 그렇다. 다만 메시가 다르면 world만이 아니라 <strong>메시 바인딩도 바꿔야</strong> 한다.</p>
+<div class="codeblock"><div class="cb-head"><span>메시가 다를 때</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">SetGraphicsRootSignature(...);
+SetPipelineState(...);
+
+for (const RenderItem&amp; item : renderItems)
+{
+    SetGraphicsRoot32BitConstants(kTransformParam, 16, &amp;item.mvp, 0);  // 1. 오브젝트별 변환
+    IASetVertexBuffers(0, 1, &amp;item.mesh-&gt;vbView);                      // 2. 메시별 버퍼
+    IASetIndexBuffer(&amp;item.mesh-&gt;ibView);
+    DrawIndexedInstanced(item.mesh-&gt;indexCount, 1, 0, 0, 0);           // 3. 그리기
+}</code></pre></div>
+
+<h3>ExecuteIndirect를 쓰면 CPU 충돌 처리가 문제?</h3>
+<p class="qa">ExecuteIndirect를 쓰면 CPU 주도로 하는 플레이어 충돌은 처리하면 안 되는 거 아냐? GPU 시뮬레이션 결과를 리드백 받아야 하잖아.</p>
+<p>아니다. <code>ExecuteIndirect</code>는 <strong>그리기 명령을 내는 방식</strong>일 뿐 시뮬레이션을 GPU로 옮기지 않는다.</p>
+<div class="codeblock"><div class="cb-head"><span>데이터 방향</span><button class="copy" type="button">복사</button></div><pre><code class="language-plaintext">[CPU] 입력 → 게임 로직 → 물리/충돌 → 최종 위치 확정
+          │
+          │ 위치·world 행렬을 업로드 (단방향)
+          ▼
+[GPU] 컬링 → Draw 인자 생성 → ExecuteIndirect로 그리기</code></pre></div>
+<p>GPU가 계산한 "무엇이 보이는지"는 게임 로직에 필요 없으니 리드백할 필요가 없다. 리드백이 문제가 되는 건 <strong>게임 로직이 GPU 결과에 의존할 때</strong>(GPU 물리로 피격 판정 등)이고, 결과가 1~2프레임 늦게 온다. 그래서 판정에 영향을 주는 시뮬레이션은 CPU, 보이기만 하는 시뮬레이션(파티클, 천, 풀)은 GPU에서 하고 리드백하지 않는 식으로 나눈다.</p>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="techniques">
+<h2><span class="num">8</span>여러 개를 그리는 4가지 방법</h2>
+
+<div class="table-wrap"><table>
+	<tr><th>상황</th><th>방식</th><th>이 프로젝트</th></tr>
+	<tr><td class="hl"><strong>같은 메시 여러 개</strong></td><td class="hl"><strong>인스턴싱</strong> (StructuredBuffer + <code>SV_InstanceID</code>), Draw 1번</td><td class="hl"><strong>← 이번에 구현</strong></td></tr>
+	<tr><td>다른 메시 여러 개</td><td>for문: 변환 설정 → (필요하면) VB/IB 바인딩 → Draw</td><td></td></tr>
+	<tr><td>다른 메시를 효율적으로</td><td>공용 VB/IB + <code>StartIndexLocation</code> / <code>BaseVertexLocation</code></td><td></td></tr>
+	<tr><td>매우 많은 오브젝트</td><td><code>ExecuteIndirect</code>로 GPU가 Draw 실행</td><td></td></tr>
+</table></div>
+<p>넷은 서로 배타적이지 않고 <strong>같이 쓰인다</strong>. 메시 종류별로 for문을 돌고(2), 각 메시는 인스턴싱으로 여러 개를 한 번에 그리고(1), VB/IB는 공용 버퍼에 모아 두는(3) 식이다. 더 나아가면 이 전체를 <code>ExecuteIndirect</code>로 GPU에 맡긴다(4).</p>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="instancing">
+<h2><span class="num">9</span>인스턴싱의 원리</h2>
+
+<p class="qa">인스턴싱 (StructuredBuffer + SV_InstanceID), Draw 1번. 이거는 어떤 원리로 되는 거야?</p>
+
+<h3>비유: 도장</h3>
+<ul>
+	<li><strong>메시 = 도장.</strong> 큐브 모양이 새겨진 도장 하나.</li>
+	<li><strong>World 행렬 = 찍을 위치 목록.</strong> "1번은 여기, 이 각도로. 2번은 저기, 저 각도로..." 100줄.</li>
+	<li><strong>인스턴싱 = "목록대로 100번 찍어"라는 지시 한 번.</strong></li>
+</ul>
+<p>도장을 100개 만들 필요가 없고(메시 하나), "찍어"를 100번 말할 필요도 없다(Draw 한 번). 목록만 있으면 된다.</p>
+
+<h3>GPU가 실제로 하는 일 (의사 코드)</h3>
+<div class="codeblock"><div class="cb-head"><span>일반 Draw: DrawIndexedInstanced(36, 1, ...)</span><button class="copy" type="button">복사</button></div><pre><code class="language-plaintext">for 정점 in 큐브의 정점들:
+    VS(정점)</code></pre></div>
+<div class="codeblock"><div class="cb-head"><span>인스턴싱: DrawIndexedInstanced(36, 100, ...)</span><button class="copy" type="button">복사</button></div><pre><code class="language-plaintext">for instanceId in 0 ~ 99:            ← GPU가 알아서 반복
+    for 정점 in 큐브의 정점들:
+        VS(정점, instanceId)         ← 몇 번째 반복인지 같이 알려 줌</code></pre></div>
+<p>달라진 건 두 가지뿐이다. ① 두 번째 인자를 100으로 주면 GPU가 <strong>같은 정점들을 100번 반복 처리</strong>한다. ② 반복할 때마다 정점 셰이더에 <strong><code>SV_InstanceID</code>(0~99)</strong>를 넘겨 준다. 이 값은 CPU가 아니라 입력 조립기(IA)가 채운다. (실제로는 순서대로가 아니라 병렬로 처리된다.)</p>
+
+<h3>셰이더가 번호로 자기 줄을 찾는다</h3>
+<p>instanceId를 무시하면 100개가 같은 자리에 겹쳐서 하나처럼 보인다. 그래서 셰이더가 번호로 목록에서 자기 행렬을 꺼낸다.</p>
+<div class="codeblock"><div class="cb-head"><span>BasicVS.hlsl 핵심</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">float4x4 world = g_instances[instanceId].World;   // 목록의 instanceId번째 줄
+worldPos = mul(정점, world);                       // 그 위치·각도로 옮김</code></pre></div>
+
+<div class="callout key">
+	<span class="label">한 문장 요약</span>
+	GPU에게 "같은 메시를 N번 처리하면서 매번 번호를 알려 줘"라고 시키고, 셰이더가 그 번호로 위치 목록을 찾아보게 하는 것. 나머지(프레임별 버퍼, 루트 SRV 등)는 그 목록을 GPU에 어떻게 전달하느냐의 세부 사항이다.
+</div>
+
+<h3>Draw 명령은 하나, 처리량은 그대로</h3>
+<p class="qa">드로우 콜 자체도 한 번만 들어가고 GPU가 100번 그리는 거잖아?</p>
+<p>맞다. 정확히는 명령 하나가 "인덱스 36 × 인스턴스 100 = 정점 셰이더 3,600회"라는 작업량이 되고, GPU가 이를 한꺼번에 병렬로 처리한다.</p>
+<div class="table-wrap"><table>
+	<tr><th></th><th>for문 Draw 100번</th><th>인스턴싱 Draw 1번</th></tr>
+	<tr><td>커맨드 리스트 명령</td><td>루트 상수 + Draw × 100</td><td>Draw 1개</td></tr>
+	<tr><td>CPU 기록 비용</td><td>100배</td><td>1번</td></tr>
+	<tr><td>Draw당 GPU 준비 비용</td><td>100번</td><td>1번</td></tr>
+	<tr><td>정점 셰이더 실행 횟수</td><td>3,600</td><td>3,600 (같음)</td></tr>
+	<tr><td>픽셀 셰이더 비용</td><td>같음</td><td>같음</td></tr>
+</table></div>
+<p>인스턴싱은 <strong>명령 수와 CPU 오버헤드를 줄이는 기법</strong>이다. GPU가 처리하는 정점·픽셀 양은 그대로라서, 그쪽이 병목이면 LOD나 컬링으로 그릴 양 자체를 줄여야 한다.</p>
+
+<h3>메시는 한 번, 인스턴스 데이터는 매 프레임</h3>
+<div class="table-wrap"><table>
+	<tr><th></th><th>메시 버퍼 (VB/IB)</th><th>인스턴스 버퍼</th></tr>
+	<tr><td>위치</td><td><code>Mesh::Init</code></td><td><code>InstanceBuffer</code></td></tr>
+	<tr><td>내용</td><td>큐브 <strong>1개</strong> (정점 8, 인덱스 36)</td><td>World 행렬 <strong>100개</strong> (6.4KB)</td></tr>
+	<tr><td>업로드</td><td>시작할 때 <strong>한 번</strong></td><td><strong>매 프레임</strong></td></tr>
+	<tr><td>이번 변경</td><td>그대로</td><td>새로 추가</td></tr>
+</table></div>
+<p>인스턴스 버퍼에는 World 말고도 <strong>개체마다 다른 값</strong>이면 무엇이든 넣을 수 있다(색, 머티리얼 인덱스, 애니메이션 시간 등). C++ 구조체와 HLSL 구조체를 같은 순서로 맞추면 된다.</p>
+
+<div class="callout">
+	<span class="label">다른 방법: 인스턴스 정점 버퍼</span>
+	인스턴스 데이터를 두 번째 정점 버퍼로 넣고 입력 레이아웃에 <code>D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA</code>를 지정하는 옛날 방식도 있다. IA가 인스턴스마다 다음 데이터로 넘어간다. StructuredBuffer 쪽이 더 유연해서 요즘은 이쪽을 많이 쓴다.
+</div>
+<div class="callout warn">
+	<span class="label">주의</span>
+	<code>SV_InstanceID</code>는 <code>StartInstanceLocation</code> 인자와 상관없이 <strong>항상 0부터</strong> 시작한다. 버퍼 중간부터 읽게 하려면 오프셋을 루트 상수로 따로 넘겨서 더해야 한다.
+</div>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="impl">
+<h2><span class="num">10</span>인스턴싱 구현: 무엇이 바뀌었나</h2>
+
+<p class="qa">그럼 지금 100개 메시 그리는데 StructuredBuffer로 처리해 봐. 그리고 이전 거랑 diff 따져서 뭐에서 뭐가 바뀌었는지 자세하게.</p>
+
+<p>핵심은 <strong>CPU가 큐브 하나의 MVP를 완성해서 넘기던 방식</strong>에서 <strong>CPU는 재료만 넘기고 GPU가 인스턴스마다 조합하는 방식</strong>으로 바뀐 것이다.</p>
+
+<div class="diagram" role="img" aria-label="인스턴싱 데이터 흐름: CPU에서 계산한 viewProj는 루트 상수로, World 100개는 InstanceBuffer를 거쳐 루트 SRV로, 메시는 VB/IB로 정점 셰이더에 전달되고, DrawIndexedInstanced 한 번으로 큐브 100개가 그려진다.">
+<svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg">
+	<defs>
+		<marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow"/></marker>
+		<marker id="ahA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow-accent"/></marker>
+	</defs>
+	<text x="120" y="18" text-anchor="middle" class="dim">CPU (매 프레임)</text>
+	<text x="375" y="18" text-anchor="middle" class="dim">전달 경로</text>
+	<text x="640" y="18" text-anchor="middle" class="dim">GPU</text>
+
+	<rect x="20" y="30" width="200" height="58" rx="8" class="box"/>
+	<text x="120" y="54" text-anchor="middle" class="strong">ComputeViewProj</text>
+	<text x="120" y="74" text-anchor="middle" class="mono">viewProj (4×4) 1개</text>
+
+	<rect x="20" y="118" width="200" height="58" rx="8" class="box"/>
+	<text x="120" y="142" text-anchor="middle" class="strong">BuildInstances</text>
+	<text x="120" y="162" text-anchor="middle" class="mono">instances[100]</text>
+
+	<rect x="20" y="206" width="200" height="58" rx="8" class="box"/>
+	<text x="120" y="230" text-anchor="middle" class="strong">Mesh (시작 시 1번)</text>
+	<text x="120" y="250" text-anchor="middle" class="mono">큐브 VB 8 / IB 36</text>
+
+	<rect x="270" y="30" width="210" height="58" rx="8" class="box-accent"/>
+	<text x="375" y="54" text-anchor="middle" class="strong">파라미터 0 · b0</text>
+	<text x="375" y="74" text-anchor="middle" class="dim">루트 상수 16개 (값 복사)</text>
+
+	<rect x="270" y="118" width="210" height="58" rx="8" class="box-note"/>
+	<text x="375" y="139" text-anchor="middle" class="strong">InstanceBuffer[frame]</text>
+	<text x="375" y="157" text-anchor="middle" class="dim">UPLOAD 힙 · memcpy</text>
+	<text x="375" y="171" text-anchor="middle" class="dim">→ 파라미터 1 · t0 (주소)</text>
+
+	<rect x="270" y="206" width="210" height="58" rx="8" class="box"/>
+	<text x="375" y="230" text-anchor="middle" class="strong">IASetVertex/IndexBuffer</text>
+	<text x="375" y="250" text-anchor="middle" class="dim">VB/IB 뷰 (주소+크기)</text>
+
+	<rect x="530" y="30" width="215" height="234" rx="8" class="box-accent"/>
+	<text x="637" y="56" text-anchor="middle" class="strong">BasicVS</text>
+	<text x="637" y="76" text-anchor="middle" class="dim">정점 36 × 인스턴스 100</text>
+	<text x="548" y="112" class="mono">id = SV_InstanceID</text>
+	<text x="548" y="136" class="mono">world = g_instances[id]</text>
+	<text x="548" y="160" class="mono">p = mul(pos, world)</text>
+	<text x="548" y="184" class="mono">clip = mul(p, g_viewProj)</text>
+	<text x="637" y="226" text-anchor="middle" class="dim">→ 래스터라이저 → PS</text>
+
+	<line x1="220" y1="59" x2="266" y2="59" class="line" marker-end="url(#ah)"/>
+	<line x1="220" y1="147" x2="266" y2="147" class="line" marker-end="url(#ah)"/>
+	<line x1="220" y1="235" x2="266" y2="235" class="line" marker-end="url(#ah)"/>
+	<line x1="480" y1="59" x2="526" y2="59" class="line-accent" marker-end="url(#ahA)"/>
+	<line x1="480" y1="147" x2="526" y2="147" class="line-accent" marker-end="url(#ahA)"/>
+	<line x1="480" y1="235" x2="526" y2="235" class="line-accent" marker-end="url(#ahA)"/>
+
+	<rect x="20" y="286" width="725" height="34" rx="8" class="box-warn"/>
+	<text x="382" y="308" text-anchor="middle" class="mono">DrawIndexedInstanced(36, 100, 0, 0, 0)  →  명령 1개로 큐브 100개</text>
+</svg>
+</div>
+
+<h3>전후 비교</h3>
+<div class="table-wrap"><table>
+	<tr><th></th><th>전</th><th>후</th></tr>
+	<tr><td>그리는 개수</td><td>1개</td><td>100개</td></tr>
+	<tr><td>CPU 계산</td><td><code>world * view * proj</code> 완성본 1개</td><td><code>view * proj</code> 1개 + <code>world</code> 100개</td></tr>
+	<tr><td>셰이더로 넘기는 것</td><td>루트 상수: MVP</td><td>루트 상수: viewProj + 루트 SRV: world 100개 버퍼 주소</td></tr>
+	<tr><td>GPU 메모리</td><td>없음 (커맨드 리스트에 복사)</td><td>인스턴스 버퍼 × 프레임 수(2)</td></tr>
+	<tr><td>Draw</td><td><code>DrawIndexedInstanced(36, 1, ...)</code></td><td><code>DrawIndexedInstanced(36, 100, ...)</code></td></tr>
+	<tr><td>셰이더 행렬 곱</td><td><code>pos × g_mvp</code></td><td><code>pos × g_instances[id].World × g_viewProj</code></td></tr>
+</table></div>
+
+<p><strong>행렬을 나눈 이유</strong>: 루트 상수 칸에는 행렬 하나(16 DWORD)만 들어가므로 큐브 100개의 MVP를 다 넣을 수 없다. 그래서 공통 부분은 루트 상수로, 큐브마다 다른 부분은 버퍼로 보냈다.</p>
+<p><strong>메모리가 필요해진 이유</strong>: 루트 상수는 값이 복사되지만, 루트 SRV는 <strong>주소만</strong> 넘기고 GPU가 Draw를 실행할 때 그 주소를 읽는다. 그래서 실제 GPU 메모리가 있어야 하고, GPU가 읽는 도중에 CPU가 덮어쓰면 안 되므로 버퍼를 프레임마다 따로 두고 <code>BeginFrame</code> 이후에만 쓴다. 6장의 "루트 상수 vs 상수 버퍼" 차이가 코드에 그대로 나타난 것이다.</p>
+
+<h3>10-1. <code>RootSignature.h</code>: 슬롯 번호</h3>
+<p>0번 슬롯은 이름만 바꿨고(이제 MVP가 아니라 viewProj), 1번 슬롯을 새로 추가했다.</p>
+<div class="codeblock"><div class="cb-head"><span>git diff HEAD -- DirectX12/RootSignature.h</span><button class="copy" type="button">복사</button></div><pre><code class="language-diff">diff --git a/DirectX12/RootSignature.h b/DirectX12/RootSignature.h
+index 3452c76..6a02158 100644
+--- a/DirectX12/RootSignature.h
++++ b/DirectX12/RootSignature.h
+@@ -3,12 +3,14 @@
+ #include &quot;D3DUtil.h&quot;
+ 
+ // 셰이더에 넘길 파라미터의 틀 (종류와 순서). 여러 PSO가 공유
+-// - 파라미터 0: 32비트 상수 16개 = float4x4 (b0, VS 전용) → MVP 행렬용
++// - 파라미터 0: 32비트 상수 16개 = float4x4 (b0, VS 전용) → View * Projection 행렬 (프레임당 한 번)
++// - 파라미터 1: 루트 SRV (t0, VS 전용) → 인스턴스별 World 행렬이 담긴 StructuredBuffer의 GPU 주소
+ class RootSignature
+ {
+ public:
+ 	// SetGraphicsRoot…의 첫 인자로 쓰는 파라미터 번호
+-	static constexpr UINT kTransformParam = 0;
++	static constexpr UINT kViewProjParam = 0;
++	static constexpr UINT kInstanceParam = 1;
+ 
+ 	void Init(ID3D12Device* device);
+ 	void Shutdown();</code></pre></div>
+
+<h3>10-2. <code>RootSignature.cpp</code>: 파라미터 배열</h3>
+<p>파라미터 0은 이름 외에 설정이 같다(루트 상수 16개, b0, VS). 파라미터 1은 <code>.Constants</code> 대신 <code>.Descriptor</code>를 채운다. 이것이 "값을 넣는 칸"과 "주소를 넣는 칸"의 차이다.</p>
+<div class="codeblock"><div class="cb-head"><span>git diff HEAD -- DirectX12/RootSignature.cpp</span><button class="copy" type="button">복사</button></div><pre><code class="language-diff">diff --git a/DirectX12/RootSignature.cpp b/DirectX12/RootSignature.cpp
+index 9ea8b23..f838a13 100644
+--- a/DirectX12/RootSignature.cpp
++++ b/DirectX12/RootSignature.cpp
+@@ -5,28 +5,36 @@
+ // SetGraphicsroot32Bitconstants로 넣는다
+ // 이 Rootsignature가 담고있는정보(2가지)는 다음과같다.
+ // 슬롯0번, b0레지스터에 32비트값16개(4x4)를 루트 상수로 넘기고 vs만 볼 수 있게 한다.
++// 슬롯1번, t0레지스터에 인스턴스 버퍼(StructuredBuffer)의 GPU 주소를 루트 SRV로 넘기고 vs만 볼 수 있게 한다.
+ // 플래그, IA 입력 레이아웃(버텍스버퍼로 정점받기)을 허용한다.
+ void RootSignature::Init(ID3D12Device* device)
+ {
+ 	// 1. 파라미터 0: 루트 상수. 힙이나 버퍼 없이 값 자체를 커맨드 리스트에 직접 기록
+ 	
+-	D3D12_ROOT_PARAMETER params[1] = {};
++	D3D12_ROOT_PARAMETER params[2] = {};
+ 
+ 	// 이슬롯에 값자체를 넣겠다는 뜻. uav, srv, dsv와 다르게 디스크립터를 쓰지않고 값을 넣겠다는뜻
+-	params[kTransformParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
++	params[kViewProjParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+ 
+-	// hlsl의 register(b0)과 연결됨 
+-	params[kTransformParam].Constants.ShaderRegister = 0;  // b0
+-	params[kTransformParam].Constants.RegisterSpace = 0;
++	// hlsl의 register(b0)과 연결됨
++	params[kViewProjParam].Constants.ShaderRegister = 0;  // b0
++	params[kViewProjParam].Constants.RegisterSpace = 0;
+ 
+ 	// 32비트값 16개(float 16개를 사용한다는뜻 4x4)
+-	params[kTransformParam].Constants.Num32BitValues = 16; // float4x4 = 32비트 × 16
++	params[kViewProjParam].Constants.Num32BitValues = 16; // float4x4 = 32비트 × 16
+ 
+-	// 이 코드의 뜻은 이 파라미터(mvp행렬)을 어느 셰이더 단계에서 볼 수 있게 할지 정하는 설정
++	// 이 코드의 뜻은 이 파라미터(viewProj행렬)을 어느 셰이더 단계에서 볼 수 있게 할지 정하는 설정
+ 	// 지금의 설정은 버텍스 셰이더에서만 보이게한다.
+ 	// D3D12_SHADER_VISIBILITY_ALL, D3D12_SHADER_VISIBILITY_PIXEL 두가지가있는데
+ 	// 여기서는 vertex만씀 이렇게 좁히면 필요한 단꼐에만 데이터를 전달하니까 드라이버가 최적화할 여지가 생김
+-	params[kTransformParam].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
++	params[kViewProjParam].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
++
++	// 1-2. 파라미터 1: 루트 SRV. 버퍼의 GPU 주소(64비트 = 2 DWORD)를 직접 넣음
++	//      디스크립터 힙 / CreateShaderResourceView 없이 바인딩 가능 (텍스처는 불가, 버퍼만 가능)
++	params[kInstanceParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
++	params[kInstanceParam].Descriptor.ShaderRegister = 0; // t0
++	params[kInstanceParam].Descriptor.RegisterSpace = 0;
++	params[kInstanceParam].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+ 
+ 	// 2. 루트 시그니처 설명. 버텍스 버퍼(입력 레이아웃)를 쓰려면 플래그 필수
+ 	D3D12_ROOT_SIGNATURE_DESC desc = {};</code></pre></div>
+
+<h3>10-3. <code>Shaders/BasicVS.hlsl</code></h3>
+<ul>
+	<li>b0는 그대로, cbuffer와 변수 이름만 바꿨다(<code>g_mvp</code> → <code>g_viewProj</code>).</li>
+	<li>구조체 안에도 <code>row_major</code>를 붙였다. StructuredBuffer 안의 행렬도 기본이 열 우선이라서, C++에서 전치하지 않으려면 필요하다.</li>
+	<li><code>VSInput</code>/<code>Common.hlsli</code>는 그대로. <code>SV_InstanceID</code>는 정점 버퍼에서 오는 값이 아니라서 함수 인자로 받았다.</li>
+</ul>
+<div class="codeblock"><div class="cb-head"><span>git diff HEAD -- DirectX12/Shaders/BasicVS.hlsl</span><button class="copy" type="button">복사</button></div><pre><code class="language-diff">diff --git a/DirectX12/Shaders/BasicVS.hlsl b/DirectX12/Shaders/BasicVS.hlsl
+index b39edf9..7ebf074 100644
+--- a/DirectX12/Shaders/BasicVS.hlsl
++++ b/DirectX12/Shaders/BasicVS.hlsl
+@@ -1,17 +1,28 @@
+ #include &quot;Common.hlsli&quot;
+ 
+-// 루트 시그니처 파라미터 0 (32비트 상수 16개 = float4x4)
++// 루트 시그니처 파라미터 0 (32비트 상수 16개 = float4x4). 프레임당 한 번, 모든 인스턴스가 공유
+ // C++(DirectXMath)은 행 우선, HLSL cbuffer 기본은 열 우선이라 row_major로 받음 (C++에서 전치 안 함)
+-cbuffer Transform : register(b0)
++cbuffer Frame : register(b0)
+ {
+-	row_major float4x4 g_mvp; // 로컬 → 월드 → 뷰 → 클립 공간
++	row_major float4x4 g_viewProj; // 월드 → 뷰 → 클립 공간
+ };
+ 
+-// 로컬 좌표 정점을 MVP로 클립 공간 좌표로 변환
+-VSOutput VSMain(VSInput input)
++// 루트 시그니처 파라미터 1 (루트 SRV). 인스턴스마다 하나씩
++// C++ InstanceData(InstanceBuffer.h)와 크기 / 순서가 같아야 함
++struct InstanceData
++{
++	row_major float4x4 World; // 로컬 → 월드
++};
++StructuredBuffer&lt;InstanceData&gt; g_instances : register(t0);
++
++// instanceId: DrawIndexedInstanced가 같은 메시를 반복할 때 몇 번째 반복인지 (0 ~ instanceCount-1)
++//             입력 조립기가 자동으로 채워 줌
++VSOutput VSMain(VSInput input, uint instanceId : SV_InstanceID)
+ {
+ 	VSOutput output;
+-	output.Position = mul(float4(input.Position, 1.0f), g_mvp); // 행 벡터 × 행렬 (DirectXMath와 같은 순서)
++	float4x4 world = g_instances[instanceId].World;              // 내 번호의 World 행렬
++	float4 worldPosition = mul(float4(input.Position, 1.0f), world); // 로컬 → 월드
++	output.Position = mul(worldPosition, g_viewProj);            // 월드 → 클립 (행 벡터 × 행렬)
+ 	output.Color = input.Color;
+ 	return output;
+ }</code></pre></div>
+
+<h3>10-4. <code>InstanceBuffer.h</code> / <code>.cpp</code> (새 파일)</h3>
+<ul>
+	<li><code>InstanceData { XMFLOAT4X4 World; }</code>: 셰이더의 <code>InstanceData</code>와 1:1. <code>static_assert</code>로 64바이트 검사.</li>
+	<li><code>Init</code>: UPLOAD 힙 버퍼를 프레임 수만큼 만들고, Map한 포인터를 <code>m_mapped[i]</code>에 보관(Unmap하지 않음).</li>
+	<li><code>Upload</code>: <code>m_mapped[frameIndex]</code>에 <code>memcpy</code>하고 그 버퍼의 GPU 주소를 반환.</li>
+	<li><code>Shutdown</code>: Unmap 후 Reset.</li>
+</ul>
+<details class="file"><summary>DirectX12/InstanceBuffer.h (37줄)</summary><div class="codeblock"><div class="cb-head"><span>DirectX12/InstanceBuffer.h</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">#pragma once
+
+#include &quot;D3DUtil.h&quot;
+
+#include &lt;DirectXMath.h&gt;
+
+// 인스턴스 하나의 데이터. BasicVS.hlsl의 InstanceData와 반드시 일치해야 함
+// (StructuredBuffer는 C++ 구조체를 그대로 배열로 읽으므로 크기 / 순서가 같아야 함)
+struct InstanceData
+{
+	DirectX::XMFLOAT4X4 World; // 로컬 → 월드 (전치하지 않음. 셰이더에서 row_major로 받음)
+};
+static_assert(sizeof(InstanceData) == 64, &quot;InstanceData 크기가 셰이더와 다름&quot;);
+
+// 인스턴스 데이터를 담는 StructuredBuffer (UPLOAD 힙, 계속 Map해 둠)
+// - CPU가 매 프레임 새로 쓰므로 프레임 수(kNumFramesInFlight)만큼 따로 둠
+//   GPU가 이전 프레임 버퍼를 읽는 중에 CPU가 덮어쓰지 않게 하기 위함
+// - 루트 SRV(t0)로 바인딩하므로 디스크립터 힙이 필요 없음
+class InstanceBuffer
+{
+public:
+	static constexpr UINT kMaxFrames = 3;
+
+	// maxInstances: 한 프레임에 쓸 수 있는 최대 인스턴스 수
+	void Init(ID3D12Device* device, UINT numFrames, UINT maxInstances);
+	void Shutdown();
+
+	// frameIndex번 버퍼에 인스턴스 데이터를 복사하고, 그 버퍼의 GPU 주소를 반환
+	// GPU가 그 버퍼를 다 쓴 뒤(= GraphicsDevice::BeginFrame 이후)에 호출해야 함
+	D3D12_GPU_VIRTUAL_ADDRESS Upload(UINT frameIndex, const InstanceData* data, UINT count);
+
+private:
+	ComPtr&lt;ID3D12Resource&gt; m_buffers[kMaxFrames];
+	InstanceData*          m_mapped[kMaxFrames] = {}; // Map해 둔 CPU 포인터
+	UINT                   m_numFrames = 0;
+	UINT                   m_maxInstances = 0;
+};</code></pre></div></details>
+<details class="file"><summary>DirectX12/InstanceBuffer.cpp (77줄)</summary><div class="codeblock"><div class="cb-head"><span>DirectX12/InstanceBuffer.cpp</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">#include &quot;InstanceBuffer.h&quot;
+
+#include &lt;cstring&gt;
+
+void InstanceBuffer::Init(ID3D12Device* device, UINT numFrames, UINT maxInstances)
+{
+	if (numFrames &gt; kMaxFrames)
+		throw std::runtime_error(&quot;InstanceBuffer: numFrames &gt; kMaxFrames&quot;);
+
+	m_numFrames = numFrames;
+	m_maxInstances = maxInstances;
+
+	// 1. 힙 속성: CPU가 매 프레임 쓰므로 UPLOAD 힙
+	D3D12_HEAP_PROPERTIES heapProps = {};
+	heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+	// 2. 리소스 설명: InstanceData × maxInstances 바이트짜리 버퍼
+	D3D12_RESOURCE_DESC desc = {};
+	desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	desc.Width = static_cast&lt;UINT64&gt;(sizeof(InstanceData)) * maxInstances;
+	desc.Height = 1;
+	desc.DepthOrArraySize = 1;
+	desc.MipLevels = 1;
+	desc.Format = DXGI_FORMAT_UNKNOWN;
+	desc.SampleDesc.Count = 1;
+	desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+	desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+	// 현재 백 버퍼 수 만큼 만든다. gpu가 이전 프레임 버퍼를 읽는 동안 cpu가 다음 프레임 데이터를 쓰려면 버퍼가 따로 있어야함
+	// m_buffers[0], m_mapped[0]  ← 짝수 프레임용
+	// m_buffers[1], m_mapped[1]  ← 홀수 프레임용
+	for (UINT i = 0; i &lt; numFrames; ++i)
+	{
+		// 3. 생성: UPLOAD 힙은 GENERIC_READ (셰이더 리소스로 읽기 포함)
+		// Committed Resource: 메모리(힙)와 리소스를 한 번에 만든다는 뜻. 힙을 따로 만들어 그 안에 리소스를 배치하는 방식(Placed Resource)도 있는데, Committed가 가장 간단
+		ThrowIfFailed(device-&gt;CreateCommittedResource(
+			&amp;heapProps,									// 어느 메모리에: UPLOAD 힙 (반복문 위에서 설정)
+			D3D12_HEAP_FLAG_NONE,						// 힙 추가 옵션: 없음
+			&amp;desc,										// 어떤 리소스: 6400바이트짜리 버퍼 (위에서 설정)
+			D3D12_RESOURCE_STATE_GENERIC_READ,			// UPLOAD 힙 리소스는 반드시 이 상태로 만들어야 하고, 다른 상태로 바꿀 수도 없음 GPU가 읽을 수 있는 여러 상태(정점 버퍼, 상수 버퍼, 셰이더 리소스, 복사 원본 등)를 모두 합친 상태
+			nullptr,
+			IID_PPV_ARGS(&amp;m_buffers[i])),				// 결과를 받을 곳
+			&quot;CreateCommittedResource(Instance)&quot;);
+
+		// 4. Map해 두고 Unmap하지 않음 (UPLOAD 힙은 Map한 채로 GPU가 읽어도 됨)
+		//    매 프레임 Map / Unmap 하는 비용을 아낌
+		D3D12_RANGE readRange = { 0, 0 }; // CPU는 읽지 않음
+		void* mapped = nullptr;
+		ThrowIfFailed(m_buffers[i]-&gt;Map(0, &amp;readRange, &amp;mapped), &quot;Map(Instance)&quot;);
+		m_mapped[i] = static_cast&lt;InstanceData*&gt;(mapped);
+
+		// Unmap하지 않는 이유 (Mesh와의 차이)
+		// UPLOAD 힙은 Map한 상태로 두어도 GPU가 읽을 수 있음(persistent mapping). 그래서 Init에서 한 번 Map한 포인터를 m_mapped[i]에 계속 들고 있다가, 매 프레임 Upload()에서 그 포인터에 memcpy
+		// Unmap은 Shutdown()에서 버퍼를 해제하기 직전에 한 번
+	}
+}
+
+void InstanceBuffer::Shutdown()
+{
+	for (UINT i = 0; i &lt; m_numFrames; ++i)
+	{
+		if (m_buffers[i])
+			m_buffers[i]-&gt;Unmap(0, nullptr);
+		m_buffers[i].Reset();
+		m_mapped[i] = nullptr;
+	}
+	m_numFrames = 0;
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS InstanceBuffer::Upload(UINT frameIndex, const InstanceData* data, UINT count)
+{
+	if (count &gt; m_maxInstances)
+		throw std::runtime_error(&quot;InstanceBuffer: count &gt; maxInstances&quot;);
+
+	memcpy(m_mapped[frameIndex], data, sizeof(InstanceData) * count);
+	return m_buffers[frameIndex]-&gt;GetGPUVirtualAddress();
+}</code></pre></div></details>
+
+<h4><code>Init</code>의 반복문이 하는 일</h4>
+<div class="table-wrap"><table>
+	<tr><th>인자 / 줄</th><th>의미</th></tr>
+	<tr><td><code>CreateCommittedResource</code></td><td>메모리(힙)와 리소스를 한 번에 만든다. 힙을 따로 만들어 배치하는 Placed Resource도 있지만 Committed가 가장 간단하다.</td></tr>
+	<tr><td><code>D3D12_RESOURCE_STATE_GENERIC_READ</code></td><td>UPLOAD 힙 리소스는 반드시 이 상태로 만들고 바꿀 수 없다. GPU 읽기 상태(정점 버퍼, 상수 버퍼, 셰이더 리소스, 복사 원본...)를 모두 합친 상태라 배리어 없이 바로 SRV로 읽을 수 있다.</td></tr>
+	<tr><td><code>nullptr</code> (클리어 값)</td><td>렌더 타깃·깊이 버퍼처럼 Clear하는 리소스에만 쓴다. 버퍼는 없음.</td></tr>
+	<tr><td><code>readRange = {0, 0}</code></td><td>CPU는 이 메모리를 읽지 않겠다고 드라이버에 알린다.</td></tr>
+	<tr><td><code>static_cast&lt;InstanceData*&gt;</code></td><td><code>void*</code>를 배열처럼 쓸 수 있게 바꿔 둔다.</td></tr>
+</table></div>
+
+<h3>10-5. <code>GraphicsDevice.h</code>: getter 하나</h3>
+<p><code>WaitForNextFrameContext</code>가 쓰는 번호와 같은 값이다. 그래서 <code>BeginFrame</code>이 기다려 준 프레임 컨텍스트와 같은 번호의 인스턴스 버퍼를 고를 수 있다.</p>
+<div class="codeblock"><div class="cb-head"><span>git diff HEAD -- DirectX12/GraphicsDevice.h</span><button class="copy" type="button">복사</button></div><pre><code class="language-diff">diff --git a/DirectX12/GraphicsDevice.h b/DirectX12/GraphicsDevice.h
+index 2d1a847..3ba2066 100644
+--- a/DirectX12/GraphicsDevice.h
++++ b/DirectX12/GraphicsDevice.h
+@@ -36,6 +36,9 @@ public:
+ 	ID3D12GraphicsCommandList* CommandList() const  { return m_commandList.Get(); }
+ 	UINT                       Width() const        { return m_width; }
+ 	UINT                       Height() const       { return m_height; }
++	// 이번 프레임의 프레임 컨텍스트 번호 (0 ~ kNumFramesInFlight-1). BeginFrame ~ EndFrame 사이에서만 유효
++	// 프레임마다 따로 두는 리소스(인스턴스 버퍼 등)를 고를 때 사용
++	UINT                       FrameIndex() const   { return m_frameIndex % kNumFramesInFlight; }
+ 	D3D12_CPU_DESCRIPTOR_HANDLE CurrentBackBufferRtv() const { return m_backBufferRtv[m_currentBackBuffer]; }
+ 	D3D12_CPU_DESCRIPTOR_HANDLE DepthBufferDsv() const       { return m_depthBufferDsv; }
+ </code></pre></div>
+
+<h3>10-6. <code>main.cpp</code></h3>
+<ul>
+	<li><code>ComputeCubeMvp</code> 삭제 → <code>ComputeViewProj</code>(프레임당 한 번) + <code>BuildInstances</code>(큐브 100개 World) 추가.</li>
+	<li>계산(<code>BuildInstances</code>)은 <code>BeginFrame</code> <strong>전</strong>, GPU 버퍼에 쓰기(<code>Upload</code>)는 <code>BeginFrame</code> <strong>후</strong>. 계산은 CPU 배열이라 언제 해도 되지만, 버퍼는 GPU가 다 쓴 뒤에 덮어써야 한다.</li>
+	<li>루트 시그니처, PSO, VB/IB 바인딩, 토폴로지는 그대로.</li>
+</ul>
+<div class="codeblock"><div class="cb-head"><span>git diff HEAD -- DirectX12/main.cpp</span><button class="copy" type="button">복사</button></div><pre><code class="language-diff">diff --git a/DirectX12/main.cpp b/DirectX12/main.cpp
+index 5876bb5..29894c5 100644
+--- a/DirectX12/main.cpp
++++ b/DirectX12/main.cpp
+@@ -11,6 +11,7 @@
+ #include &quot;RootSignature.h&quot;
+ #include &quot;BasicPipeline.h&quot;
+ #include &quot;Camera.h&quot;
++#include &quot;InstanceBuffer.h&quot;
+ 
+ using namespace DirectX;
+ 
+@@ -23,26 +24,46 @@ static UINT g_resizeHeight = 0;
+ // ---------------------------------------------------------------------------
+ // 렌더링
+ // ---------------------------------------------------------------------------
+-// 큐브의 MVP 행렬 (전치하지 않음. 셰이더의 g_mvp가 row_major라 그대로 읽음)
+-// 왼손 좌표계, Y-up, +Z 앞쪽
+-static XMFLOAT4X4 ComputeCubeMvp(float angleRadians, const Camera&amp; camera, float aspectRatio)
+-{
+-	// Model(World): 로컬 → 월드. Y축으로 회전
+-	XMMATRIX world = XMMatrixRotationY(angleRadians);
++// 왼손 좌표계, Y-up, +Z 앞쪽. 행렬은 전치하지 않음 (셰이더에서 row_major로 받음)
++
++// 큐브 격자: kGridSize × kGridSize개를 XZ 평면에 kGridSpacing 간격으로 배치
++static constexpr UINT  kGridSize     = 10;
++static constexpr UINT  kNumInstances = kGridSize * kGridSize;
++static constexpr float kGridSpacing  = 2.0f;
+ 
++// View * Projection (프레임당 한 번, 모든 인스턴스가 공유)
++static XMFLOAT4X4 ComputeViewProj(const Camera&amp; camera, float aspectRatio)
++{
+ 	// View: 월드 → 카메라. Projection: 카메라 → 클립 공간
+ 	XMMATRIX view = camera.ViewMatrix();
+ 	XMMATRIX proj = camera.ProjectionMatrix(aspectRatio);
+ 
+-	// 행 벡터 규약: v * World * View * Proj
+-	XMMATRIX mvp = world * view * proj;
+-
+ 	XMFLOAT4X4 result;
+-	//XMStoreFloat4x4(&amp;result, XMMatrixTranspose(mvp));
+-	XMStoreFloat4x4(&amp;result, mvp);
++	XMStoreFloat4x4(&amp;result, view * proj);
+ 	return result;
+ }
+ 
++// 인스턴스마다 World 행렬 계산. x는 가운데 정렬, z는 원점에서 앞쪽(+Z)으로 늘어놓음
++// 큐브마다 회전 위상을 조금씩 다르게 해서 각자 다른 각도로 돌게 함
++static void BuildInstances(float angleRadians, InstanceData* out)
++{
++	const float halfWidth = (kGridSize - 1) * kGridSpacing * 0.5f;
++
++	for (UINT z = 0; z &lt; kGridSize; ++z)
++	{
++		for (UINT x = 0; x &lt; kGridSize; ++x)
++		{
++			const UINT  index = z * kGridSize + x;
++			const float phase = static_cast&lt;float&gt;(index) * 0.15f;
++
++			// 행 벡터 규약: v * Rotation * Translation (제자리에서 돌고 → 격자 위치로 이동)
++			XMMATRIX world = XMMatrixRotationY(angleRadians + phase)
++				* XMMatrixTranslation(x * kGridSpacing - halfWidth, 0.0f, z * kGridSpacing);
++			XMStoreFloat4x4(&amp;out[index].World, world);
++		}
++	}
++}
++
+ // ---------------------------------------------------------------------------
+ // Win32
+ // ---------------------------------------------------------------------------
+@@ -113,14 +134,17 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
+ 	RootSignature  rootSignature;
+ 	BasicPipeline  basicPipeline;
+ 	Camera         camera;
++	InstanceBuffer instanceBuffer;
+ 
+ 	float cubeAngle = 0.0f; // 라디안
++	InstanceData instances[kNumInstances];
+ 
+ 	int exitCode = 0;
+ 	try
+ 	{
+ 		gfx.Init(hwnd);
+ 		cube.Init(gfx.Device());
++		instanceBuffer.Init(gfx.Device(), GraphicsDevice::kNumFramesInFlight, kNumInstances);
+ 		rootSignature.Init(gfx.Device());
+ 
+ 		// 이 부분은 PSO(Pipeline State Object)를 만드는 호출
+@@ -149,22 +173,30 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
+ 			imgui.BeginFrame();
+ 			controlPanel.Draw(gfx.Width(), gfx.Height(), camera);
+ 
+-			// 업데이트: 카메라 이동 / 회전, 큐브 회전 각도 누적 → MVP 계산
++			// 업데이트: 카메라 이동 / 회전, 큐브 회전 각도 누적 → ViewProj / 인스턴스 World 계산
+ 			const float deltaTime = ImGui::GetIO().DeltaTime;
+ 			camera.Update(deltaTime);
+ 			cubeAngle += XMConvertToRadians(controlPanel.RotationSpeed()) * deltaTime;
+ 			const float aspectRatio = static_cast&lt;float&gt;(gfx.Width()) / static_cast&lt;float&gt;(gfx.Height());
+-			const XMFLOAT4X4 mvp = ComputeCubeMvp(cubeAngle, camera, aspectRatio);
++			const XMFLOAT4X4 viewProj = ComputeViewProj(camera, aspectRatio);
++			BuildInstances(cubeAngle, instances);
+ 
+ 			ID3D12GraphicsCommandList* commandList = gfx.BeginFrame(controlPanel.ClearColor());
++
++			// 인스턴스 데이터 업로드. BeginFrame이 이 프레임 번호의 GPU 작업이 끝나길 기다렸으므로
++			// 이제 이 프레임 번호의 버퍼를 덮어써도 안전함
++			const D3D12_GPU_VIRTUAL_ADDRESS instanceAddress = instanceBuffer.Upload(gfx.FrameIndex(), instances, kNumInstances);
++
+ 			// 큐브 드로우: 틀(루트 시그니처) → 처리 방법(PSO) → 데이터(버퍼) → 그리기
+ 			commandList-&gt;SetGraphicsRootSignature(rootSignature.Get());
+ 			commandList-&gt;SetPipelineState(basicPipeline.Get());
+-			commandList-&gt;SetGraphicsRoot32BitConstants(RootSignature::kTransformParam, 16, &amp;mvp, 0);
++			commandList-&gt;SetGraphicsRoot32BitConstants(RootSignature::kViewProjParam, 16, &amp;viewProj, 0);
++			commandList-&gt;SetGraphicsRootShaderResourceView(RootSignature::kInstanceParam, instanceAddress);
+ 			commandList-&gt;IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+ 			commandList-&gt;IASetVertexBuffers(0, 1, &amp;cube.VertexBufferView());
+ 			commandList-&gt;IASetIndexBuffer(&amp;cube.IndexBufferView());
+-			commandList-&gt;DrawIndexedInstanced(cube.IndexCount(), 1, 0, 0, 0);
++			// 같은 큐브 메시를 kNumInstances번 반복. 반복마다 VS의 SV_InstanceID가 0, 1, 2, ...
++			commandList-&gt;DrawIndexedInstanced(cube.IndexCount(), kNumInstances, 0, 0, 0);
+ 
+ 			imgui.Render(commandList);
+ 			gfx.EndFrame();
+@@ -181,6 +213,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
+ 	// 직접 만든 파이프라인 리소스 해제 (GPU 대기 후, gfx.Shutdown 이전에)
+ 	basicPipeline.Shutdown();
+ 	rootSignature.Shutdown();
++	instanceBuffer.Shutdown();
+ 	cube.Shutdown();
+ 	gfx.Shutdown();
+ 	DestroyAppWindow(hwnd, hInstance);</code></pre></div>
+
+<h3>10-7. 프로젝트 파일</h3>
+<div class="codeblock"><div class="cb-head"><span>git diff HEAD -- DirectX12/DirectX12.vcxproj</span><button class="copy" type="button">복사</button></div><pre><code class="language-diff">diff --git a/DirectX12/DirectX12.vcxproj b/DirectX12/DirectX12.vcxproj
+index 3a96d80..52a3fa6 100644
+--- a/DirectX12/DirectX12.vcxproj
++++ b/DirectX12/DirectX12.vcxproj
+@@ -102,6 +102,7 @@
+     &lt;ClCompile Include=&quot;RootSignature.cpp&quot; /&gt;
+     &lt;ClCompile Include=&quot;BasicPipeline.cpp&quot; /&gt;
+     &lt;ClCompile Include=&quot;Camera.cpp&quot; /&gt;
++    &lt;ClCompile Include=&quot;InstanceBuffer.cpp&quot; /&gt;
+     &lt;ClCompile Include=&quot;imgui\imgui.cpp&quot; /&gt;
+     &lt;ClCompile Include=&quot;imgui\imgui_demo.cpp&quot; /&gt;
+     &lt;ClCompile Include=&quot;imgui\imgui_draw.cpp&quot; /&gt;
+@@ -119,6 +120,7 @@
+     &lt;ClInclude Include=&quot;RootSignature.h&quot; /&gt;
+     &lt;ClInclude Include=&quot;BasicPipeline.h&quot; /&gt;
+     &lt;ClInclude Include=&quot;Camera.h&quot; /&gt;
++    &lt;ClInclude Include=&quot;InstanceBuffer.h&quot; /&gt;
+     &lt;ClInclude Include=&quot;imgui\imconfig.h&quot; /&gt;
+     &lt;ClInclude Include=&quot;imgui\imgui.h&quot; /&gt;
+     &lt;ClInclude Include=&quot;imgui\imgui_impl_dx12.h&quot; /&gt;</code></pre></div>
+
+<div class="callout">
+	<span class="label">바뀌지 않은 파일</span>
+	<code>BasicPipeline</code>(PSO, 입력 레이아웃), <code>Mesh</code>, <code>BasicPS.hlsl</code>, <code>Common.hlsli</code>, <code>Camera</code>, <code>GraphicsDevice.cpp</code>. PSO는 루트 시그니처 포인터만 참조하므로 루트 시그니처 내용이 바뀌어도 PSO 코드를 고칠 필요가 없다.
+</div>
+
+<details class="file">
+	<summary>DirectX12/RootSignature.cpp 전체 (변경 후)</summary>
+<div class="codeblock"><div class="cb-head"><span>DirectX12/RootSignature.cpp</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">#include &quot;RootSignature.h&quot;
+
+// 이 init에서는 desc의 파라미터 정의, 직렬화, m_rootsignature객체생성을 담당함
+// rootsignature는 값자체는없고 셰이더가 받을 입력의 형식만 정한 틀이다. 실제 값(mvp행렬)은 그릴때
+// SetGraphicsroot32Bitconstants로 넣는다
+// 이 Rootsignature가 담고있는정보(2가지)는 다음과같다.
+// 슬롯0번, b0레지스터에 32비트값16개(4x4)를 루트 상수로 넘기고 vs만 볼 수 있게 한다.
+// 슬롯1번, t0레지스터에 인스턴스 버퍼(StructuredBuffer)의 GPU 주소를 루트 SRV로 넘기고 vs만 볼 수 있게 한다.
+// 플래그, IA 입력 레이아웃(버텍스버퍼로 정점받기)을 허용한다.
+void RootSignature::Init(ID3D12Device* device)
+{
+	// 1. 파라미터 0: 루트 상수. 힙이나 버퍼 없이 값 자체를 커맨드 리스트에 직접 기록
+	
+	D3D12_ROOT_PARAMETER params[2] = {};
+
+	// 이슬롯에 값자체를 넣겠다는 뜻. uav, srv, dsv와 다르게 디스크립터를 쓰지않고 값을 넣겠다는뜻
+	params[kViewProjParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+
+	// hlsl의 register(b0)과 연결됨
+	params[kViewProjParam].Constants.ShaderRegister = 0;  // b0
+	params[kViewProjParam].Constants.RegisterSpace = 0;
+
+	// 32비트값 16개(float 16개를 사용한다는뜻 4x4)
+	params[kViewProjParam].Constants.Num32BitValues = 16; // float4x4 = 32비트 × 16
+
+	// 이 코드의 뜻은 이 파라미터(viewProj행렬)을 어느 셰이더 단계에서 볼 수 있게 할지 정하는 설정
+	// 지금의 설정은 버텍스 셰이더에서만 보이게한다.
+	// D3D12_SHADER_VISIBILITY_ALL, D3D12_SHADER_VISIBILITY_PIXEL 두가지가있는데
+	// 여기서는 vertex만씀 이렇게 좁히면 필요한 단꼐에만 데이터를 전달하니까 드라이버가 최적화할 여지가 생김
+	params[kViewProjParam].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+
+	// 1-2. 파라미터 1: 루트 SRV. 버퍼의 GPU 주소(64비트 = 2 DWORD)를 직접 넣음
+	//      디스크립터 힙 / CreateShaderResourceView 없이 바인딩 가능 (텍스처는 불가, 버퍼만 가능)
+	params[kInstanceParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+	params[kInstanceParam].Descriptor.ShaderRegister = 0; // t0
+	params[kInstanceParam].Descriptor.RegisterSpace = 0;
+	params[kInstanceParam].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+
+	// 2. 루트 시그니처 설명. 버텍스 버퍼(입력 레이아웃)를 쓰려면 플래그 필수
+	D3D12_ROOT_SIGNATURE_DESC desc = {};
+	desc.NumParameters = _countof(params);
+	desc.pParameters = params;
+	desc.NumStaticSamplers = 0;
+	desc.pStaticSamplers = nullptr;
+
+
+	// 버텍스 버퍼를 쓸거에요 라고 gpu에 알려준다 
+	desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+	// 3. 직렬화: 설명 구조체 → GPU 드라이버가 읽는 바이너리 blob
+	// 이부분에서 직렬화가 일어난다. 흩어진 정보를 포인터 없는 바이트 덩어리 하나로 묶어서 signature blob에 담는다
+	// 애초에 CreateRootsignature가 blob만 받는다.
+	// API설계상 구조체(desc)가 아니라 바이트 덩어리를 입력으로 받게 되어있다.
+	ComPtr&lt;ID3DBlob&gt; signature;
+	ComPtr&lt;ID3DBlob&gt; error;
+	HRESULT hr = D3D12SerializeRootSignature(&amp;desc, D3D_ROOT_SIGNATURE_VERSION_1, &amp;signature, &amp;error);
+	if (FAILED(hr))
+	{
+		// 설명이 잘못되면 error blob에 이유가 문자열로 들어 있음
+		if (error)
+			OutputDebugStringA(static_cast&lt;const char*&gt;(error-&gt;GetBufferPointer()));
+		ThrowIfFailed(hr, &quot;D3D12SerializeRootSignature&quot;);
+	}
+
+	// 4. 생성
+	// 실제로 ram의 힙영역에 rootsignature에 생성된다. 생성하고나서 m_rootsignature에 주소값을 박는다
+	ThrowIfFailed(device-&gt;CreateRootSignature(0, signature-&gt;GetBufferPointer(), signature-&gt;GetBufferSize(),
+		IID_PPV_ARGS(&amp;m_rootSignature)), &quot;CreateRootSignature&quot;);
+}
+
+void RootSignature::Shutdown()
+{
+	m_rootSignature.Reset();
+}</code></pre></div>
+</details>
+<details class="file">
+	<summary>DirectX12/Shaders/BasicVS.hlsl 전체 (변경 후)</summary>
+<div class="codeblock"><div class="cb-head"><span>DirectX12/Shaders/BasicVS.hlsl</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">#include &quot;Common.hlsli&quot;
+
+// 루트 시그니처 파라미터 0 (32비트 상수 16개 = float4x4). 프레임당 한 번, 모든 인스턴스가 공유
+// C++(DirectXMath)은 행 우선, HLSL cbuffer 기본은 열 우선이라 row_major로 받음 (C++에서 전치 안 함)
+cbuffer Frame : register(b0)
+{
+	row_major float4x4 g_viewProj; // 월드 → 뷰 → 클립 공간
+};
+
+// 루트 시그니처 파라미터 1 (루트 SRV). 인스턴스마다 하나씩
+// C++ InstanceData(InstanceBuffer.h)와 크기 / 순서가 같아야 함
+struct InstanceData
+{
+	row_major float4x4 World; // 로컬 → 월드
+};
+StructuredBuffer&lt;InstanceData&gt; g_instances : register(t0);
+
+// instanceId: DrawIndexedInstanced가 같은 메시를 반복할 때 몇 번째 반복인지 (0 ~ instanceCount-1)
+//             입력 조립기가 자동으로 채워 줌
+VSOutput VSMain(VSInput input, uint instanceId : SV_InstanceID)
+{
+	VSOutput output;
+	float4x4 world = g_instances[instanceId].World;              // 내 번호의 World 행렬
+	float4 worldPosition = mul(float4(input.Position, 1.0f), world); // 로컬 → 월드
+	output.Position = mul(worldPosition, g_viewProj);            // 월드 → 클립 (행 벡터 × 행렬)
+	output.Color = input.Color;
+	return output;
+}</code></pre></div>
+</details>
+<details class="file">
+	<summary>DirectX12/main.cpp 전체 (변경 후)</summary>
+<div class="codeblock"><div class="cb-head"><span>DirectX12/main.cpp</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">// DirectX 12 + Dear ImGui 기초 렌더링 연습
+// - D3D12 디바이스 / 스왑체인 / 프레임 동기화: GraphicsDevice
+// - ImGui 백엔드: ImGuiLayer, 컨트롤 패널 UI: ControlPanel
+// - 렌더링 파이프라인(루트 시그니처, 셰이더, PSO, 버텍스 버퍼, 드로우)은 직접 작성
+
+#include &quot;D3DUtil.h&quot;
+#include &quot;GraphicsDevice.h&quot;
+#include &quot;ImGuiLayer.h&quot;
+#include &quot;ControlPanel.h&quot;
+#include &quot;Mesh.h&quot;
+#include &quot;RootSignature.h&quot;
+#include &quot;BasicPipeline.h&quot;
+#include &quot;Camera.h&quot;
+#include &quot;InstanceBuffer.h&quot;
+
+using namespace DirectX;
+
+static constexpr wchar_t kWindowClassName[] = L&quot;DirectX12Sample&quot;;
+
+// WM_SIZE로 들어온 새 크기. 메인 루프에서 적용 후 0으로 되돌림
+static UINT g_resizeWidth = 0;
+static UINT g_resizeHeight = 0;
+
+// ---------------------------------------------------------------------------
+// 렌더링
+// ---------------------------------------------------------------------------
+// 왼손 좌표계, Y-up, +Z 앞쪽. 행렬은 전치하지 않음 (셰이더에서 row_major로 받음)
+
+// 큐브 격자: kGridSize × kGridSize개를 XZ 평면에 kGridSpacing 간격으로 배치
+static constexpr UINT  kGridSize     = 10;
+static constexpr UINT  kNumInstances = kGridSize * kGridSize;
+static constexpr float kGridSpacing  = 2.0f;
+
+// View * Projection (프레임당 한 번, 모든 인스턴스가 공유)
+static XMFLOAT4X4 ComputeViewProj(const Camera&amp; camera, float aspectRatio)
+{
+	// View: 월드 → 카메라. Projection: 카메라 → 클립 공간
+	XMMATRIX view = camera.ViewMatrix();
+	XMMATRIX proj = camera.ProjectionMatrix(aspectRatio);
+
+	XMFLOAT4X4 result;
+	XMStoreFloat4x4(&amp;result, view * proj);
+	return result;
+}
+
+// 인스턴스마다 World 행렬 계산. x는 가운데 정렬, z는 원점에서 앞쪽(+Z)으로 늘어놓음
+// 큐브마다 회전 위상을 조금씩 다르게 해서 각자 다른 각도로 돌게 함
+static void BuildInstances(float angleRadians, InstanceData* out)
+{
+	const float halfWidth = (kGridSize - 1) * kGridSpacing * 0.5f;
+
+	for (UINT z = 0; z &lt; kGridSize; ++z)
+	{
+		for (UINT x = 0; x &lt; kGridSize; ++x)
+		{
+			const UINT  index = z * kGridSize + x;
+			const float phase = static_cast&lt;float&gt;(index) * 0.15f;
+
+			// 행 벡터 규약: v * Rotation * Translation (제자리에서 돌고 → 격자 위치로 이동)
+			XMMATRIX world = XMMatrixRotationY(angleRadians + phase)
+				* XMMatrixTranslation(x * kGridSpacing - halfWidth, 0.0f, z * kGridSpacing);
+			XMStoreFloat4x4(&amp;out[index].World, world);
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Win32
+// ---------------------------------------------------------------------------
+static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+	if (ImGuiLayer::HandleMessage(hWnd, msg, wParam, lParam))
+		return true;
+
+	switch (msg)
+	{
+	case WM_SIZE:
+		if (wParam == SIZE_MINIMIZED)
+			return 0;
+		g_resizeWidth = static_cast&lt;UINT&gt;(LOWORD(lParam));
+		g_resizeHeight = static_cast&lt;UINT&gt;(HIWORD(lParam));
+		return 0;
+	case WM_SYSCOMMAND:
+		if ((wParam &amp; 0xfff0) == SC_KEYMENU) // ALT 메뉴 비활성화
+			return 0;
+		break;
+	case WM_DESTROY:
+		PostQuitMessage(0);
+		return 0;
+	}
+	return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+static HWND CreateAppWindow(HINSTANCE hInstance, float dpiScale)
+{
+	WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance, nullptr, LoadCursor(nullptr, IDC_ARROW), nullptr, nullptr, kWindowClassName, nullptr };
+	RegisterClassExW(&amp;wc);
+	return CreateWindowW(kWindowClassName, L&quot;DirectX 12 + ImGui&quot;, WS_OVERLAPPEDWINDOW,
+		100, 100, static_cast&lt;int&gt;(1280 * dpiScale), static_cast&lt;int&gt;(800 * dpiScale), nullptr, nullptr, hInstance, nullptr);
+}
+
+static void DestroyAppWindow(HWND hwnd, HINSTANCE hInstance)
+{
+	DestroyWindow(hwnd);
+	UnregisterClassW(kWindowClassName, hInstance);
+}
+
+// 대기 중인 메시지를 모두 처리. WM_QUIT를 받으면 false
+static bool PumpMessages()
+{
+	MSG msg;
+	while (PeekMessageW(&amp;msg, nullptr, 0U, 0U, PM_REMOVE))
+	{
+		if (msg.message == WM_QUIT)
+			return false;
+		TranslateMessage(&amp;msg);
+		DispatchMessageW(&amp;msg);
+	}
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// 진입점
+// ---------------------------------------------------------------------------
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
+{
+	const float dpiScale = ImGuiLayer::EnableDpiAwareness();
+	HWND hwnd = CreateAppWindow(hInstance, dpiScale);
+
+	GraphicsDevice gfx;
+	ImGuiLayer     imgui;
+	ControlPanel   controlPanel;
+	Mesh           cube;
+	RootSignature  rootSignature;
+	BasicPipeline  basicPipeline;
+	Camera         camera;
+	InstanceBuffer instanceBuffer;
+
+	float cubeAngle = 0.0f; // 라디안
+	InstanceData instances[kNumInstances];
+
+	int exitCode = 0;
+	try
+	{
+		gfx.Init(hwnd);
+		cube.Init(gfx.Device());
+		instanceBuffer.Init(gfx.Device(), GraphicsDevice::kNumFramesInFlight, kNumInstances);
+		rootSignature.Init(gfx.Device());
+
+		// 이 부분은 PSO(Pipeline State Object)를 만드는 호출
+		// 루트 시그니처가 셰이더 입력의 틀이었다면, PSO는 이 물체를 어떻게 그릴지데 대한 설정 전부를 하나로 묶은 객체
+		basicPipeline.Init(gfx.Device(), rootSignature.Get(), GraphicsDevice::kBackBufferFormat, GraphicsDevice::kDepthFormat);
+		imgui.Init(hwnd, gfx.Device(), gfx.CommandQueue(), GraphicsDevice::kNumFramesInFlight,
+			GraphicsDevice::kBackBufferFormat, GraphicsDevice::kDepthFormat, dpiScale);
+
+		ShowWindow(hwnd, SW_SHOWDEFAULT);
+		UpdateWindow(hwnd);
+
+		while (PumpMessages())
+		{
+			// 창이 가려졌거나 최소화된 경우 렌더링 쉬기
+			if (gfx.IsOccluded() || IsIconic(hwnd))
+			{
+				Sleep(10);
+				continue;
+			}
+			if (g_resizeWidth != 0 &amp;&amp; g_resizeHeight != 0)
+			{
+				gfx.Resize(g_resizeWidth, g_resizeHeight);
+				g_resizeWidth = g_resizeHeight = 0;
+			}
+
+			imgui.BeginFrame();
+			controlPanel.Draw(gfx.Width(), gfx.Height(), camera);
+
+			// 업데이트: 카메라 이동 / 회전, 큐브 회전 각도 누적 → ViewProj / 인스턴스 World 계산
+			const float deltaTime = ImGui::GetIO().DeltaTime;
+			camera.Update(deltaTime);
+			cubeAngle += XMConvertToRadians(controlPanel.RotationSpeed()) * deltaTime;
+			const float aspectRatio = static_cast&lt;float&gt;(gfx.Width()) / static_cast&lt;float&gt;(gfx.Height());
+			const XMFLOAT4X4 viewProj = ComputeViewProj(camera, aspectRatio);
+			BuildInstances(cubeAngle, instances);
+
+			ID3D12GraphicsCommandList* commandList = gfx.BeginFrame(controlPanel.ClearColor());
+
+			// 인스턴스 데이터 업로드. BeginFrame이 이 프레임 번호의 GPU 작업이 끝나길 기다렸으므로
+			// 이제 이 프레임 번호의 버퍼를 덮어써도 안전함
+			const D3D12_GPU_VIRTUAL_ADDRESS instanceAddress = instanceBuffer.Upload(gfx.FrameIndex(), instances, kNumInstances);
+
+			// 큐브 드로우: 틀(루트 시그니처) → 처리 방법(PSO) → 데이터(버퍼) → 그리기
+			commandList-&gt;SetGraphicsRootSignature(rootSignature.Get());
+			commandList-&gt;SetPipelineState(basicPipeline.Get());
+			commandList-&gt;SetGraphicsRoot32BitConstants(RootSignature::kViewProjParam, 16, &amp;viewProj, 0);
+			commandList-&gt;SetGraphicsRootShaderResourceView(RootSignature::kInstanceParam, instanceAddress);
+			commandList-&gt;IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+			commandList-&gt;IASetVertexBuffers(0, 1, &amp;cube.VertexBufferView());
+			commandList-&gt;IASetIndexBuffer(&amp;cube.IndexBufferView());
+			// 같은 큐브 메시를 kNumInstances번 반복. 반복마다 VS의 SV_InstanceID가 0, 1, 2, ...
+			commandList-&gt;DrawIndexedInstanced(cube.IndexCount(), kNumInstances, 0, 0, 0);
+
+			imgui.Render(commandList);
+			gfx.EndFrame();
+		}
+	}
+	catch (const std::exception&amp; e)
+	{
+		MessageBoxA(hwnd, e.what(), &quot;Error&quot;, MB_OK | MB_ICONERROR);
+		exitCode = 1;
+	}
+
+	gfx.WaitForGpuOnExit();
+	imgui.Shutdown();
+	// 직접 만든 파이프라인 리소스 해제 (GPU 대기 후, gfx.Shutdown 이전에)
+	basicPipeline.Shutdown();
+	rootSignature.Shutdown();
+	instanceBuffer.Shutdown();
+	cube.Shutdown();
+	gfx.Shutdown();
+	DestroyAppWindow(hwnd, hInstance);
+
+	return exitCode;
+}</code></pre></div>
+</details>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="transform">
+<h2><span class="num">11</span>위치와 회전은 어디서 계산하나</h2>
+
+<p class="qa">인스턴스 버퍼로 큐브들 돌리는 건 어디서 처리하고 있는 거야? 포지션 계산은 어디서 하는데?</p>
+
+<p>회전과 위치 모두 <strong>CPU의 <code>BuildInstances</code></strong>에서 계산해 <strong>World 행렬 하나에 합친다</strong>. 인스턴스 버퍼는 결과를 실어 나르기만 하고, 셰이더는 행렬을 곱하기만 한다.</p>
+<div class="codeblock"><div class="cb-head"><span>DirectX12/main.cpp  L46–65</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">// 인스턴스마다 World 행렬 계산. x는 가운데 정렬, z는 원점에서 앞쪽(+Z)으로 늘어놓음
+// 큐브마다 회전 위상을 조금씩 다르게 해서 각자 다른 각도로 돌게 함
+static void BuildInstances(float angleRadians, InstanceData* out)
+{
+	const float halfWidth = (kGridSize - 1) * kGridSpacing * 0.5f;
+
+	for (UINT z = 0; z &lt; kGridSize; ++z)
+	{
+		for (UINT x = 0; x &lt; kGridSize; ++x)
+		{
+			const UINT  index = z * kGridSize + x;
+			const float phase = static_cast&lt;float&gt;(index) * 0.15f;
+
+			// 행 벡터 규약: v * Rotation * Translation (제자리에서 돌고 → 격자 위치로 이동)
+			XMMATRIX world = XMMatrixRotationY(angleRadians + phase)
+				* XMMatrixTranslation(x * kGridSpacing - halfWidth, 0.0f, z * kGridSpacing);
+			XMStoreFloat4x4(&amp;out[index].World, world);
+		}
+	}
+}</code></pre></div>
+
+<div class="table-wrap"><table>
+	<tr><th>단계</th><th>위치</th><th>하는 일</th></tr>
+	<tr><td>각도 갱신</td><td><code>main.cpp:179</code></td><td><code>cubeAngle += 회전속도 × deltaTime</code></td></tr>
+	<tr><td>회전 + 위치 행렬</td><td><code>main.cpp:60-61</code></td><td><code>RotationY(angle + phase) * Translation(x, 0, z)</code></td></tr>
+	<tr><td>전달</td><td><code>InstanceBuffer::Upload</code></td><td>GPU 메모리로 memcpy</td></tr>
+	<tr><td>적용</td><td><code>BasicVS.hlsl</code></td><td>정점 × World × viewProj</td></tr>
+</table></div>
+
+<h3>실제 좌표</h3>
+<div class="table-wrap"><table>
+	<tr><th>축</th><th>식</th><th>0</th><th>1</th><th>…</th><th>9</th></tr>
+	<tr><td>X</td><td><code>x * 2 - 9</code></td><td>-9</td><td>-7</td><td>…</td><td>+9</td></tr>
+	<tr><td>Y</td><td><code>0</code></td><td>0</td><td>0</td><td>…</td><td>0</td></tr>
+	<tr><td>Z</td><td><code>z * 2</code></td><td>0</td><td>2</td><td>…</td><td>18</td></tr>
+</table></div>
+<ul>
+	<li>X는 <code>halfWidth</code>(= (10-1)×2×0.5 = 9)를 빼서 원점 기준 좌우 대칭. 카메라가 x = 0에 있어서 격자 한가운데를 본다.</li>
+	<li>Z는 0부터 +Z로만. 카메라가 z = -3에서 +Z를 보므로 격자가 앞쪽으로 펼쳐진다.</li>
+	<li><code>phase = index * 0.15</code>로 큐브마다 각도가 조금씩 달라 물결처럼 어긋나 돈다.</li>
+</ul>
+
+<h3>위치가 행렬에 들어가는 원리</h3>
+<p><code>XMMatrixTranslation(tx, ty, tz)</code>는 행 벡터 규약에서 <strong>마지막 행</strong>에 이동량이 있는 행렬이다.</p>
+<div class="codeblock"><div class="cb-head"><span>Translation 행렬</span><button class="copy" type="button">복사</button></div><pre><code class="language-plaintext">1   0   0   0
+0   1   0   0
+0   0   1   0
+tx  ty  tz  1</code></pre></div>
+<p><code>RotationY * Translation</code>을 곱하면 위쪽 3×3은 회전, 마지막 행은 위치가 된다(3장의 뷰 행렬과 같은 구조). 셰이더에서 <code>mul(float4(pos, 1.0f), world)</code>를 하면 w = 1이 마지막 행과 곱해져 위치가 더해진다. 곱하는 순서가 <code>Rotation * Translation</code>이라 "제자리에서 돌고 → 격자 위치로 이동"이 된다.</p>
+
+<h3>왜 10×10 격자?</h3>
+<p class="qa">그리드로 10×10으로 나눈 이유는 그냥 회전 계산하려고 그런 거야? 왜 100으로 안 하고 10×10으로 한 거임?</p>
+<p>회전과 상관없다. 개수는 실제로 100개이고, 10×10은 <strong>화면 어디에 놓을지 정하는 배치</strong>일 뿐이다. GPU 입장에서는 인스턴스 버퍼가 평평한 1차원 배열 100칸이고, 2중 for문은 CPU에서 각 칸의 위치를 계산할 때만 쓴다(<code>index = z * 10 + x</code>).</p>
+<div class="table-wrap"><table>
+	<tr><th>배치</th><th>결과</th></tr>
+	<tr><td>일렬 100개 (<code>x = i * 2</code>)</td><td>200 유닛 길이. 화면에 다 안 들어오고 끝쪽은 far(100)보다 멀어서 잘림</td></tr>
+	<tr><td class="hl"><strong>10×10 격자</strong></td><td class="hl">18×18 정도 영역. 한 화면에 대부분 보임</td></tr>
+	<tr><td>랜덤 위치</td><td>가능하지만 겹치거나 몰릴 수 있음</td></tr>
+</table></div>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="shared">
+<h2><span class="num">12</span>공용 VB/IB + 오프셋</h2>
+
+<p class="qa">다른 메시를 효율적으로는 어떤 방법임? 지금 거랑 뭔 차이인지 자세하게.</p>
+
+<p>여러 메시의 정점과 인덱스를 <strong>큰 VB 하나, 큰 IB 하나에 이어 붙이고</strong>, Draw할 때 <strong>"이 버퍼의 어디부터가 이 메시인지"를 오프셋으로</strong> 알려 주는 방법이다. 버퍼 바인딩은 한 번이면 된다.</p>
+<p>비유하면 인스턴싱은 도장 하나를 여러 번 찍는 것이고, 이건 <strong>큰 판 하나에 도장 여러 개를 나란히 새겨 두고</strong> 찍을 때 어느 칸인지만 말하는 것이다.</p>
+
+<div class="codeblock"><div class="cb-head"><span>큐브 + 평면을 한 버퍼에</span><button class="copy" type="button">복사</button></div><pre><code class="language-plaintext">공용 VB (정점)                    공용 IB (인덱스)
+┌────────────┬──────────┐        ┌──────────────────┬────────┐
+│ 큐브 0~7   │ 평면 0~3 │        │ 큐브 인덱스 36개 │ 평면 6개│
+└────────────┴──────────┘        └──────────────────┴────────┘
+ 위치 0         위치 8              위치 0              위치 36</code></pre></div>
+<div class="codeblock"><div class="cb-head"><span>SubMesh와 그리기</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">struct SubMesh
+{
+    UINT indexCount;          // 인덱스 몇 개
+    UINT startIndexLocation;  // IB에서 몇 번째 인덱스부터
+    INT  baseVertexLocation;  // 인덱스 값에 더할 정점 오프셋
+};
+SubMesh cubeMesh  = { 36, 0,  0 };
+SubMesh planeMesh = {  6, 36, 8 };
+
+// 바인딩은 한 번만
+IASetVertexBuffers(0, 1, &amp;sharedVbView);
+IASetIndexBuffer(&amp;sharedIbView);
+
+DrawIndexedInstanced(cubeMesh.indexCount,  1, cubeMesh.startIndexLocation,  cubeMesh.baseVertexLocation,  0);
+DrawIndexedInstanced(planeMesh.indexCount, 1, planeMesh.startIndexLocation, planeMesh.baseVertexLocation, 0);</code></pre></div>
+<p><strong><code>baseVertexLocation</code>이 필요한 이유</strong>: 평면의 인덱스는 따로 만들 때처럼 0부터 시작한다(0, 1, 2, 0, 2, 3). 그런데 공용 VB에서 평면 정점은 8번부터 있다. GPU가 인덱스를 읽을 때마다 8을 더해 실제 위치를 찾으므로, 각 메시의 인덱스 데이터를 고치지 않고 그대로 이어 붙일 수 있다.</p>
+
+<h3>지금 구현과의 차이</h3>
+<p>지금은 <strong>메시 1종류 + 전용 VB/IB + 인스턴싱</strong>이다. <code>Mesh</code>가 자기 버퍼를 따로 갖고, 버퍼에 큐브 하나뿐이라 오프셋이 0, 0이다.</p>
+<div class="table-wrap"><table>
+	<tr><th></th><th>인스턴싱 (지금)</th><th>공용 VB/IB</th></tr>
+	<tr><td>해결하는 문제</td><td><strong>같은</strong> 메시를 여러 개</td><td><strong>다른</strong> 메시 여러 종류</td></tr>
+	<tr><td>줄이는 것</td><td>Draw 호출 수 (100 → 1)</td><td>VB/IB 바인딩 교체 (종류 수 → 1)</td></tr>
+	<tr><td>Draw 개수</td><td>메시 종류당 1번</td><td>여전히 메시 종류당 1번</td></tr>
+	<tr><td>핵심 인자</td><td>2번째 <code>instanceCount</code></td><td>3·4번째 <code>startIndexLocation</code>, <code>baseVertexLocation</code></td></tr>
+	<tr><td>정리하는 것</td><td>개체마다 다른 데이터</td><td>메시 모양 데이터를 어디 두나</td></tr>
+</table></div>
+<p>인스턴싱은 "<strong>몇 개</strong> 그리나", 공용 VB/IB는 "모양 데이터를 <strong>어디에</strong> 두나"의 문제다. 서로 다른 축이라 같이 쓴다.</p>
+<div class="codeblock"><div class="cb-head"><span>지금 방식에 평면을 추가하면 vs 공용 버퍼</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">// 메시마다 전용 버퍼 (지금 방식)
+IASetVertexBuffers(cube VB);  IASetIndexBuffer(cube IB);
+DrawIndexedInstanced(36, 100, 0, 0, 0);
+IASetVertexBuffers(plane VB); IASetIndexBuffer(plane IB);   // ← 바인딩 교체
+DrawIndexedInstanced(6, 20, 0, 0, 0);
+
+// 공용 VB/IB
+IASetVertexBuffers(shared VB); IASetIndexBuffer(shared IB);  // 한 번만
+DrawIndexedInstanced(36, 100, 0,  0, 0);     // 큐브
+DrawIndexedInstanced( 6,  20, 36, 8, 100);   // 평면 (인스턴스 버퍼 100번 칸부터 → 오프셋 루트 상수 필요)</code></pre></div>
+
+<h3>버퍼가 커지면 바인딩이 무거워지지 않나?</h3>
+<p class="qa">처음 바인딩할 때 좀 무거운 거 아냐? 버퍼가 다 담긴 애를 처리해야 하니까.</p>
+<p>아니다. 바인딩은 데이터를 옮기는 게 아니라 <strong>주소를 알려 주는 것</strong>이다. <code>D3D12_VERTEX_BUFFER_VIEW</code>는 <code>BufferLocation</code>(8B) + <code>SizeInBytes</code>(4B) + <code>StrideInBytes</code>(4B) = <strong>16바이트</strong>. 버퍼가 1KB든 100MB든 똑같다.</p>
+<div class="table-wrap"><table>
+	<tr><th>작업</th><th>언제</th><th>비용</th></tr>
+	<tr><td>버퍼 생성 + 업로드</td><td>로딩 때 한 번</td><td>데이터 크기에 비례 (무거움)</td></tr>
+	<tr><td>바인딩</td><td>Draw 전</td><td>주소 설정 (매우 가벼움)</td></tr>
+	<tr><td>Draw</td><td>매번</td><td>실제로 참조하는 정점만 읽음</td></tr>
+</table></div>
+<p>그래도 바인딩을 줄이는 이유는 상태 변경마다 작은 고정 비용이 쌓이기 때문이고, 더 큰 이유는 <code>ExecuteIndirect</code> 같은 GPU 주도 렌더링에서 공용 버퍼가 사실상 전제 조건이기 때문이다.</p>
+<div class="callout warn">
+	<span class="label">조건</span>
+	같은 버퍼에 넣을 메시들은 <strong>정점 형식(stride, 입력 레이아웃)과 인덱스 형식(R16/R32)이 같아야</strong> 한다.
+</div>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="indirect">
+<h2><span class="num">13</span>ExecuteIndirect와 GPU 주도 렌더링</h2>
+
+<p class="qa">ExecuteIndirect는 뭐임? 어떤 원리임?</p>
+<p>한 줄로: <strong>Draw 인자를 CPU가 커맨드 리스트에 적지 않고, GPU 메모리의 버퍼에서 읽어 오게 하는 기능</strong>이다.</p>
+<div class="codeblock"><div class="cb-head"><span>일반 Draw vs ExecuteIndirect</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">// 일반: 인자를 CPU가 기록 시점에 확정
+DrawIndexedInstanced(36, 100, 0, 0, 0);
+
+// ExecuteIndirect: 인자는 GPU 버퍼에, 명령에는 위치만
+ExecuteIndirect(commandSignature,
+                maxCount,        // 최대 몇 개의 Draw
+                argumentBuffer,  // Draw 인자 배열이 담긴 GPU 버퍼
+                0,
+                countBuffer,     // 실제 Draw 개수가 담긴 GPU 버퍼 (선택)
+                0);</code></pre></div>
+<div class="codeblock"><div class="cb-head"><span>argumentBuffer 내용</span><button class="copy" type="button">복사</button></div><pre><code class="language-plaintext">[0] { indexCount=36, instanceCount=1, startIndex=0,  baseVertex=0, startInstance=0 }
+[1] { indexCount=6,  instanceCount=1, startIndex=36, baseVertex=8, startInstance=0 }
+[2] ...</code></pre></div>
+
+<h3>핵심: 인자를 GPU가 직접 만든다</h3>
+<div class="codeblock"><div class="cb-head"><span>GPU 주도 렌더링 흐름</span><button class="copy" type="button">복사</button></div><pre><code class="language-plaintext">[CPU] 모든 오브젝트 정보(위치, 바운딩 박스, 메시 ID)를 버퍼에 올림
+  │
+  ▼
+[GPU 컴퓨트 셰이더] 오브젝트마다 보이는지 검사 (컬링)
+  │   보이는 것만 argumentBuffer에 Draw 인자 추가, countBuffer에 개수 기록
+  ▼
+[GPU] ExecuteIndirect → 보이는 것만 그림</code></pre></div>
+<p>CPU는 무엇이 보이는지 몰라도 되고, 리드백도 필요 없다. 오브젝트가 수만 개여도 CPU가 기록하는 건 <code>Dispatch</code> 하나와 <code>ExecuteIndirect</code> 하나다.</p>
+
+<h3>Command Signature</h3>
+<p>인자 버퍼의 한 항목이 무엇으로 이루어졌는지 GPU에 알려 주는 설명서다.</p>
+<div class="codeblock"><div class="cb-head"><span>항목 = 루트 상수 1개 + DrawIndexed 인자</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">D3D12_INDIRECT_ARGUMENT_DESC args[2] = {};
+args[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;      // 루트 상수 바꾸기 (오브젝트 번호)
+args[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;  // Draw</code></pre></div>
+<ul>
+	<li><strong>바꿀 수 있는 것</strong>: 루트 상수, 루트 CBV/SRV/UAV 주소, VB/IB 뷰, Draw 인자</li>
+	<li><strong>바꿀 수 없는 것</strong>: PSO, 루트 시그니처 → PSO별로 <code>ExecuteIndirect</code>를 따로 호출</li>
+	<li>VB/IB 뷰도 바꿀 수는 있지만 항목이 커지고 드라이버에 따라 느려질 수 있어서, 보통은 공용 VB/IB + 오프셋을 쓴다.</li>
+</ul>
+
+<div class="table-wrap"><table>
+	<tr><th></th><th>인스턴싱</th><th>ExecuteIndirect</th></tr>
+	<tr><td>한 명령으로 그리는 것</td><td>같은 메시 N개</td><td>서로 다른 메시 여러 개 (Draw 여러 번)</td></tr>
+	<tr><td>인자를 정하는 쪽</td><td>CPU (기록 시점)</td><td>GPU 버퍼 (실행 시점)</td></tr>
+	<tr><td>개수를 GPU가 정하나</td><td>X</td><td>O (countBuffer)</td></tr>
+	<tr><td>주 용도</td><td>같은 모양 대량 렌더링</td><td>GPU 컬링, GPU 주도 렌더링</td></tr>
+</table></div>
+
+<h3>무조건 ExecuteIndirect가 좋은가?</h3>
+<p>아니다. <strong>CPU가 Draw 기록에 병목일 때</strong> 쓰는 해결책이다.</p>
+<div class="table-wrap"><table>
+	<tr><th>대가</th><th>내용</th></tr>
+	<tr><td>구조가 복잡</td><td>공용 VB/IB, 바인드리스, 오브젝트 데이터 버퍼, 컴퓨트 컬링, 커맨드 시그니처가 전부 필요</td></tr>
+	<tr><td>디버깅이 어려움</td><td>인자를 GPU가 만드니 CPU 브레이크포인트로 볼 수 없음 (PIX 필요)</td></tr>
+	<tr><td>적을 때는 손해</td><td>수십 개면 CPU for문이 더 빠르고 단순. 디스패치·배리어 고정 비용이 더 큼</td></tr>
+	<tr><td>유연성 제한</td><td>PSO, 루트 시그니처를 중간에 못 바꿈</td></tr>
+	<tr><td>CPU가 결과를 모름</td><td>무엇이 그려졌는지 필요하면 다시 리드백</td></tr>
+</table></div>
+<p>실제 엔진은 섞어 쓴다. 대량의 불투명 정적 지오메트리(건물, 지형, 바위, 식생)는 GPU 주도로, 반투명·UI·특수 효과·소수의 캐릭터는 CPU 주도로. 판단은 프로파일링으로 한다.</p>
+
+<h3>래스터라이저 컬링 · 컴퓨트 컬링 · 정렬</h3>
+<p class="qa">GPU에서 렌더링할 때 래스터라이저를 이용해 컬링하려면 컴퓨트 셰이더로 정렬을 해야 해?</p>
+<p>셋은 다른 것이다. GPU 주도 렌더링에서 컴퓨트 셰이더가 하는 일은 <strong>정렬이 아니라 필터링</strong>이다.</p>
+<div class="table-wrap"><table>
+	<tr><th></th><th>래스터라이저 컬링</th><th>컴퓨트 컬링</th></tr>
+	<tr><td>내용</td><td>클리핑, 백페이스 컬링, 깊이 테스트</td><td>프러스텀 / 오클루전 컬링 (바운딩 박스)</td></tr>
+	<tr><td>단위</td><td>삼각형 / 픽셀</td><td>오브젝트</td></tr>
+	<tr><td>시점</td><td>정점 셰이더 <strong>후</strong></td><td>Draw <strong>전</strong></td></tr>
+	<tr><td>설정</td><td>자동 (PSO 설정)</td><td>직접 구현</td></tr>
+	<tr><td>절약</td><td>픽셀 셰이더 비용</td><td>정점 셰이더 + Draw 비용 전체</td></tr>
+</table></div>
+<p>둘 다 쓴다. 컴퓨트 컬링이 오브젝트를 크게 걸러내고, 살아남은 것 안에서 래스터라이저가 세밀하게 걸러낸다. <strong>불투명은 깊이 버퍼가 순서와 무관하게 결과를 보장하므로 정렬이 필수가 아니다.</strong> 앞→뒤 정렬은 Early-Z 최적화일 뿐이고, GPU 주도 렌더링에서는 보통 깊이 프리패스나 2단계 오클루전 컬링(이전 프레임 Hi-Z)으로 같은 효과를 얻는다. 정렬이 꼭 필요한 반투명은 보통 CPU 경로에서 처리한다.</p>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="heaps">
+<h2><span class="num">14</span>UPLOAD / DEFAULT 힙과 업로드</h2>
+
+<p class="qa">그러면 VB/IB가 든 버퍼를 만드는 거 자체만 좀 무겁다는 이야기지?</p>
+<p>그렇다. 무거운 건 <strong>생성</strong>(<code>CreateCommittedResource</code>, 드라이버·OS 관여)과 <strong>데이터 복사</strong>(크기에 비례)이고, 보통 로딩 때 한 번만 한다.</p>
+
+<div class="table-wrap"><table>
+	<tr><th>힙</th><th>위치 (외장 GPU)</th><th>CPU 쓰기</th><th>GPU 읽기</th><th>용도</th></tr>
+	<tr><td>UPLOAD</td><td>시스템 RAM</td><td>쉬움 (Map)</td><td>느림 (PCIe)</td><td>매 프레임 바뀌는 데이터</td></tr>
+	<tr><td>DEFAULT</td><td>VRAM</td><td>직접 불가</td><td>빠름</td><td>한 번 올리고 계속 쓰는 데이터</td></tr>
+	<tr><td>READBACK</td><td>시스템 RAM</td><td>-</td><td>GPU가 씀</td><td>GPU → CPU</td></tr>
+</table></div>
+
+<p>지금 <code>Mesh</code>는 VB/IB를 UPLOAD 힙에 만든다. 큐브 하나라 차이가 거의 없지만, 메시가 커지면 보통 이렇게 올린다.</p>
+<ol>
+	<li>UPLOAD 힙에 임시 버퍼를 만들고 데이터를 쓴다.</li>
+	<li>DEFAULT 힙에 진짜 버퍼를 만든다.</li>
+	<li><code>CopyBufferRegion</code>으로 GPU가 복사하게 한다.</li>
+	<li>배리어(<code>COPY_DEST</code> → <code>VERTEX_AND_CONSTANT_BUFFER</code> 등), 펜스 대기 후 임시 버퍼 해제.</li>
+</ol>
+
+<h3>인스턴스 버퍼는 왜 DEFAULT로 복사하지 않나</h3>
+<p class="qa">CPU는 계속 인스턴스 버퍼를 업로드하는데, 이걸 언제 DEFAULT 힙으로 복사하는 거야?</p>
+<p><strong>복사하지 않는다.</strong> GPU가 Draw할 때 UPLOAD 힙에서 바로 읽는다.</p>
+<div class="table-wrap"><table>
+	<tr><th></th><th>메시 VB/IB</th><th>인스턴스 버퍼</th></tr>
+	<tr><td>쓰기</td><td>로딩 때 한 번</td><td>매 프레임</td></tr>
+	<tr><td>GPU가 읽는 횟수</td><td>수천 프레임 동안 계속</td><td>그 프레임에 한 번</td></tr>
+	<tr><td>크기</td><td>클 수 있음 (MB)</td><td>작음 (6.4KB)</td></tr>
+</table></div>
+<p>DEFAULT로 옮기려면 매 프레임 "UPLOAD에 쓰기 → <code>CopyBufferRegion</code> → 배리어 → Draw → 배리어 되돌리기"가 필요하다. 어차피 GPU가 UPLOAD에서 한 번 읽는 것(복사)은 똑같이 일어나므로 읽기를 한 번 더 얹을 뿐이다.</p>
+<p>셰이더에서는 행렬 하나를 정점 수(36)만큼 읽지만, 처음 PCIe로 가져온 데이터는 GPU 캐시(L2)에 남아 나머지는 캐시에서 처리된다. PCIe를 건너는 건 거의 6.4KB 한 번이다.</p>
+<div class="table-wrap"><table>
+	<tr><th>UPLOAD에서 바로 읽어도 되는 조건</th><th>지금</th></tr>
+	<tr><td>매 프레임 바뀜</td><td>O</td></tr>
+	<tr><td>한 프레임에 한 패스에서만 읽음</td><td>O</td></tr>
+	<tr><td>크기가 작음</td><td>O (6.4KB)</td></tr>
+	<tr><td>GPU가 수정할 필요 없음 (UAV 불필요)</td><td>O</td></tr>
+</table></div>
+<p>여러 패스에서 읽거나, 수십 MB로 커지거나, 컴퓨트 셰이더가 수정해야 하면 DEFAULT 복사를 고려한다. 참고로 최신 GPU의 Resizable BAR(<code>D3D12_HEAP_TYPE_GPU_UPLOAD</code>)는 CPU가 VRAM에 직접 쓸 수 있게 해 준다(Agility SDK 필요).</p>
+
+<h3>memcpy가 곧 업로드인가</h3>
+<p class="qa"><code>memcpy(m_mapped[frameIndex], data, ...)</code> 이런 식으로 복사하는 건 CPU의 고유한 특성이고, 이런 식이라면 upload라고 생각해도 되는 거지?</p>
+<p>그렇게 생각해도 된다. 정확히는 "<code>memcpy</code>라서"가 아니라 <strong>Map으로 얻은 UPLOAD 힙 포인터에 CPU가 쓰는 것</strong>이 업로드다. <code>memcpy</code>든 <code>m_mapped[f][3].World = ...</code> 직접 대입이든 똑같다. DEFAULT 힙에는 CPU 포인터를 얻을 방법이 없으므로, "UPLOAD 힙에 CPU가 쓰는 것"이 D3D12에서 CPU → GPU 데이터 전송의 유일한 출발점이다.</p>
+<div class="callout warn">
+	<span class="label">UPLOAD 메모리에서 읽지 말 것</span>
+	UPLOAD 힙은 보통 <strong>write-combined</strong> 메모리라서 순서대로 쓰기는 빠르지만 <strong>읽기는 매우 느리다</strong>. 그래서 계산은 CPU 배열(<code>instances[100]</code>)에서 끝내고, 마지막에 통째로 복사한다. <code>m_mapped[f][i].World._41 += 1.0f</code> 같은 읽고-수정-쓰기는 피한다.
+</div>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="map">
+<h2><span class="num">15</span>Map의 의미와 persistent mapping</h2>
+
+<h3>Unmap을 안 하면 문제인가</h3>
+<p class="qa">원래 Unmap을 안 하면 뭐가 문제인데? 여러 개의 버퍼를 다 Unmap 안 해도 됨?</p>
+<p>D3D12에서 UPLOAD 힙은 <strong>Unmap하지 않아도 문제없다</strong>. Map한 채로 계속 두는 persistent mapping이 공식적으로 허용되고 권장되기도 한다. 버퍼가 여러 개여도 각각 독립적이라 전부 Map해 둬도 된다.</p>
+<ul>
+	<li>UPLOAD 힙은 CPU와 GPU가 같은 내용을 보도록(coherent) 되어 있어서, Unmap하지 않아도 쓴 내용이 GPU에 보인다.</li>
+	<li><code>Unmap(0, &amp;writtenRange)</code>의 범위는 PIX 같은 도구용 힌트일 뿐 데이터를 보내는 동작이 아니다.</li>
+	<li>Map한 채로 리소스를 해제해도 자동으로 정리된다. <code>Shutdown()</code>의 Unmap은 짝을 맞추는 깔끔함 때문이다.</li>
+	<li>같은 버퍼를 여러 번 Map하면 D3D12가 횟수를 세고 같은 포인터를 준다. 이 경우 Unmap도 같은 횟수만큼 해야 풀린다.</li>
+</ul>
+<div class="callout">
+	<span class="label">D3D11과의 차이</span>
+	D3D11에서는 Map/Unmap 사이에 GPU가 리소스를 쓸 수 없어서 반드시 Unmap해야 했고, 그게 "GPU로 보낸다"는 의미였다. D3D12의 Map은 그냥 "CPU 포인터를 받아 두는 것"이다.
+</div>
+<p>신경 쓸 점은 Unmap 여부가 아니라 <strong>GPU가 읽는 중인 버퍼에 쓰지 않는 것</strong>이다. 포인터를 항상 쥐고 있으니 아무 때나 쓸 수 있고, D3D12는 막아 주지 않는다. 그래서 버퍼를 프레임마다 두고 <code>BeginFrame</code> 이후에만 쓴다. (32비트 프로그램이라면 가상 주소 공간 부족도 고려해야 하지만 x64에서는 상관없다. READBACK 힙은 Map할 때 읽을 범위를 정확히 넘겨야 한다.)</p>
+<p><code>Mesh.cpp</code>에서 Unmap하는 건 다시 쓸 일이 없는 포인터를 들고 있을 이유가 없어서이지, 필수라서가 아니다.</p>
+
+<h3>Map을 한다는 건 무슨 의미인가</h3>
+<p class="qa">Map을 하면 그냥 버퍼가 가리키는 데이터가 있는 곳의 포인터를 반환하는 거임?</p>
+<p>결과만 보면 그렇다. 다만 원래 있던 포인터를 꺼내 주는 게 아니라, <strong>CPU가 접근할 수 있는 주소를 새로 연결해서</strong> 주는 것이다. 이름이 Map(매핑)인 이유다.</p>
+
+<div class="diagram" role="img" aria-label="같은 물리 메모리를 CPU와 GPU가 각자의 가상 주소로 가리킨다. GPU 쪽 연결은 리소스 생성 시 등록되고, CPU 쪽 연결은 Map이 추가한다.">
+<svg viewBox="0 0 760 270" xmlns="http://www.w3.org/2000/svg">
+	<defs>
+		<marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow"/></marker>
+		<marker id="ah2A" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow-accent"/></marker>
+	</defs>
+	<rect x="20" y="20" width="220" height="190" rx="10" class="box"/>
+	<text x="130" y="46" text-anchor="middle" class="strong">CPU 가상 주소 공간</text>
+	<text x="130" y="66" text-anchor="middle" class="dim">(내 프로세스)</text>
+	<rect x="40" y="100" width="180" height="56" rx="8" class="box-accent"/>
+	<text x="130" y="124" text-anchor="middle" class="mono">m_mapped[i]</text>
+	<text x="130" y="144" text-anchor="middle" class="dim">Map 후에 생김</text>
+
+	<rect x="520" y="20" width="220" height="190" rx="10" class="box"/>
+	<text x="630" y="46" text-anchor="middle" class="strong">GPU 가상 주소 공간</text>
+	<text x="630" y="66" text-anchor="middle" class="dim">(셰이더가 읽는 주소)</text>
+	<rect x="540" y="100" width="180" height="56" rx="8" class="box-note"/>
+	<text x="630" y="124" text-anchor="middle" class="mono">GetGPUVirtualAddress()</text>
+	<text x="630" y="144" text-anchor="middle" class="dim">생성 시부터 있음</text>
+
+	<rect x="285" y="100" width="190" height="56" rx="8" class="box-warn"/>
+	<text x="380" y="124" text-anchor="middle" class="strong">실제 메모리 6,400B</text>
+	<text x="380" y="144" text-anchor="middle" class="dim">UPLOAD 힙 → 보통 시스템 RAM</text>
+
+	<line x1="220" y1="128" x2="281" y2="128" class="line-accent" stroke-dasharray="5 4" marker-end="url(#ah2A)"/>
+	<line x1="540" y1="128" x2="479" y2="128" class="line" marker-end="url(#ah2)"/>
+	<text x="250" y="186" text-anchor="middle" class="dim">CPU 페이지 테이블</text>
+	<text x="250" y="202" text-anchor="middle" class="dim">(Map이 추가)</text>
+	<text x="510" y="186" text-anchor="middle" class="dim">GPU 페이지 테이블</text>
+	<text x="510" y="202" text-anchor="middle" class="dim">(생성 시 등록)</text>
+	<text x="380" y="252" text-anchor="middle" class="dim">Map / Unmap은 왼쪽 연결만 붙였다 뗐다 한다. 데이터와 GPU 주소는 그대로.</text>
+</svg>
+</div>
+
+<h3>처음에 CPU 주소 공간에 없으면 어디에 있나</h3>
+<p class="qa">처음에 CPU 주소 공간에 없으면 어디에 있는데? 그리고 Map할 때마다 다른 주소값이 나오나?</p>
+<p><strong>물리 메모리는 버퍼를 만들 때 이미 있다.</strong> 없는 건 그 메모리를 가리키는 CPU 쪽 주소다. 프로그램이 쓰는 포인터 값은 <strong>가상 주소</strong>이고, OS가 프로세스마다 <strong>페이지 테이블</strong>로 "가상 주소 X는 물리 메모리 Y"를 연결한다. 표에 없는 가상 주소에 접근하면 액세스 위반이 난다.</p>
+<p><code>CreateCommittedResource</code>를 호출하면 드라이버와 OS(그래픽 커널)가:</p>
+<ol>
+	<li>물리 메모리를 확보한다(UPLOAD면 보통 시스템 RAM, DEFAULT면 VRAM).</li>
+	<li>GPU 페이지 테이블에 등록한다 → <code>GetGPUVirtualAddress()</code>가 바로 동작.</li>
+	<li>CPU 페이지 테이블에는 등록하지 않는다.</li>
+</ol>
+<p><code>Map</code>은 내 프로세스의 가상 주소 범위를 하나 잡아 그 물리 메모리에 연결하고 그 주소를 돌려준다. 메모리를 옮기거나 복사하는 게 아니라 <strong>연결만 추가</strong>한다. DEFAULT 힙은 일반적으로 CPU에서 VRAM으로 가는 경로가 없어서 Map이 안 된다.</p>
+
+<h3>Map할 때마다 주소가 다른가</h3>
+<div class="codeblock"><div class="cb-head"><span>이미 Map된 상태에서 또 Map → 같은 주소</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">buf-&gt;Map(0, &amp;r, &amp;p1);   // 연결 생성, 횟수 1
+buf-&gt;Map(0, &amp;r, &amp;p2);   // 기존 연결 재사용, 횟수 2 → p1 == p2</code></pre></div>
+<div class="codeblock"><div class="cb-head"><span>완전히 Unmap한 뒤 다시 Map → 같다는 보장 없음</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">buf-&gt;Map(0, &amp;r, &amp;p1);
+buf-&gt;Unmap(0, nullptr);   // 횟수 0 → CPU 주소 반납
+buf-&gt;Map(0, &amp;r, &amp;p2);     // 새로 연결 → p2 != p1 일 수 있음
+// p1은 이제 쓰면 안 되는 포인터</code></pre></div>
+<p>물리 메모리와 GPU 주소는 그대로다. 그래서 지금 <code>InstanceBuffer</code>처럼 <strong>한 번 Map하고 유지</strong>하는 방식이 편하다. 매 프레임 Map/Unmap했다면 이전에 저장한 포인터를 다시 쓰는 실수를 하기 쉬웠을 것이다.</p>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="next">
+<h2><span class="num">16</span>정리와 다음 단계</h2>
+
+<h3>오늘의 핵심</h3>
+<ul>
+	<li>뷰 행렬은 카메라 월드 변환의 역행렬이고, <code>LookToLH</code>가 Rᵀ와 -p를 직접 채워 만든다.</li>
+	<li>루트 시그니처는 값 없는 배치도. 값은 커맨드 리스트의 슬롯에 들어가고, 루트 상수는 호출 시점에 복사된다.</li>
+	<li>인스턴싱 = 같은 메시를 N번 처리하며 <code>SV_InstanceID</code>를 넘겨 주고, 셰이더가 그 번호로 인스턴스 데이터를 찾는 것. 줄어드는 건 CPU/명령 비용이지 GPU 처리량이 아니다.</li>
+	<li>루트 SRV는 주소만 넘기므로 메모리 수명과 동기화를 직접 관리해야 한다 → 프레임별 버퍼 + <code>BeginFrame</code> 이후 쓰기.</li>
+	<li>작고 매 프레임 바뀌고 한 번 읽는 데이터는 UPLOAD 힙에서 바로 읽는 게 맞다. Map은 CPU 주소 연결이고, UPLOAD 힙은 계속 Map해 둬도 된다.</li>
+</ul>
+
+<h3>코드 메모</h3>
+<div class="callout warn">
+	<span class="label">주석 수정 제안</span>
+	<code>InstanceBuffer.cpp:29</code>의 "현재 백 버퍼 수 만큼"은 "동시에 진행 중인 프레임 수(<code>kNumFramesInFlight</code>, 2개)만큼"이 맞다. 백 버퍼는 3개(<code>kNumBackBuffers</code>)다. 버퍼 개수는 GPU가 아직 끝내지 못한 프레임이 최대 몇 개인지로 정해진다.
+</div>
+
+<h3>다음 단계 후보</h3>
+<ol>
+	<li><code>kGridSize</code>를 30으로 바꿔 900개로 늘려 보기 (Draw는 그대로 1번).</li>
+	<li>메시 하나 추가(구, 평면) → 메시별 for문과 공용 VB/IB + 오프셋 연습.</li>
+	<li>메시 VB/IB를 DEFAULT 힙 업로드로 바꾸기 (<code>CopyBufferRegion</code> + 배리어 + 펜스).</li>
+	<li>조명 도입 시 프레임 상수 버퍼(b0)와 오브젝트 데이터 분리.</li>
+	<li>그 다음: 컴퓨트 셰이더 → GPU 컬링 → <code>ExecuteIndirect</code>.</li>
+</ol>
+</section>
+
+</div>
+</main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+(function () {
+	// 코드 하이라이트
+	if (window.hljs) {
+		document.querySelectorAll('pre code').forEach(function (el) { window.hljs.highlightElement(el); });
+	}
+
+	// 복사 버튼
+	document.querySelectorAll('.codeblock .copy').forEach(function (btn) {
+		btn.addEventListener('click', function () {
+			var code = btn.closest('.codeblock').querySelector('code').innerText;
+			var done = function () { btn.textContent = '복사됨'; setTimeout(function () { btn.textContent = '복사'; }, 1200); };
+			if (navigator.clipboard) navigator.clipboard.writeText(code).then(done, function () {});
+		});
+	});
+
+	// 테마 토글 (브라우저에만 기억)
+	var root = document.documentElement;
+	var light = document.getElementById('hl-light');
+	var dark = document.getElementById('hl-dark');
+	function applyTheme(t) {
+		if (t === 'light' || t === 'dark') {
+			root.setAttribute('data-theme', t);
+			light.media = t === 'light' ? 'all' : 'not all';
+			dark.media = t === 'dark' ? 'all' : 'not all';
+		} else {
+			root.removeAttribute('data-theme');
+			light.media = '(prefers-color-scheme: light)';
+			dark.media = '(prefers-color-scheme: dark)';
+		}
+	}
+	var saved = null;
+	try { saved = localStorage.getItem('dx12-notes-theme'); } catch (e) {}
+	applyTheme(saved);
+	document.querySelector('.theme-toggle').addEventListener('click', function () {
+		var isDark = root.getAttribute('data-theme') === 'dark' ||
+			(!root.getAttribute('data-theme') && window.matchMedia('(prefers-color-scheme: dark)').matches);
+		var next = isDark ? 'light' : 'dark';
+		applyTheme(next);
+		try { localStorage.setItem('dx12-notes-theme', next); } catch (e) {}
+	});
+
+	// 목차 현재 위치 표시
+	var links = {};
+	document.querySelectorAll('.sidebar a[href^="#"]').forEach(function (a) { links[a.getAttribute('href').slice(1)] = a; });
+	if ('IntersectionObserver' in window) {
+		var obs = new IntersectionObserver(function (entries) {
+			entries.forEach(function (en) {
+				if (en.isIntersecting && links[en.target.id]) {
+					Object.keys(links).forEach(function (k) { links[k].classList.remove('active'); });
+					links[en.target.id].classList.add('active');
+				}
+			});
+		}, { rootMargin: '-10% 0px -80% 0px' });
+		document.querySelectorAll('section.chapter').forEach(function (s) { obs.observe(s); });
+	}
+})();
+</script>
+</body>
+</html>
