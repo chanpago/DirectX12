@@ -1717,6 +1717,104 @@ buf-&gt;Map(0, &amp;r, &amp;p2);     // 새로 연결 → p2 != p1 일 수 있�
 	<span class="label">한 줄 요약</span>
 	외장 GPU의 정적 메시: "임시 UPLOAD에 쓰기 → DEFAULT로 GPU 복사 → 펜스 확인 후 임시 구역 해제/재사용 → DEFAULT는 필요한 동안 유지"가 기본이다. 내장 GPU, ReBAR, 아주 작은 데이터는 예외가 될 수 있다.
 </div>
+
+<h3>오픈 월드는 그리드로 나눠 올리고 내리나</h3>
+<p class="qa">그러면 오픈월드 같은건 런타임에 실시간으로 지역을 그리드로 나누어서 vram에 올리고 내리고 하는건가?</p>
+<p>큰 틀은 맞다. 월드를 <strong>셀(cell)</strong>로 나누고, 플레이어(카메라) 주변 셀만 메모리에 두고, 멀어진 셀은 내린다. Unreal 5의 World Partition이 정확히 이 구조다(셀 그리드 + 로딩 범위 + "streaming source" = 보통 플레이어). 다만 실제로는 "셀 단위로 통째로 올리고 내리기" 하나만 있는 게 아니라 <strong>여러 층이 겹쳐</strong> 있다.</p>
+
+<div class="diagram" role="img" aria-label="플레이어 주변 7x7 셀 그리드. 가운데 3x3은 전체 디테일로 로드, 그 바깥 링은 미리 불러오는 구역, 가장 바깥은 저해상도 대리 모델 또는 언로드">
+<svg viewBox="0 0 520 280" xmlns="http://www.w3.org/2000/svg">
+	<rect class="box" x="20" y="20" width="30" height="30" rx="3"/>
+	<rect class="box" x="54" y="20" width="30" height="30" rx="3"/>
+	<rect class="box" x="88" y="20" width="30" height="30" rx="3"/>
+	<rect class="box" x="122" y="20" width="30" height="30" rx="3"/>
+	<rect class="box" x="156" y="20" width="30" height="30" rx="3"/>
+	<rect class="box" x="190" y="20" width="30" height="30" rx="3"/>
+	<rect class="box" x="224" y="20" width="30" height="30" rx="3"/>
+	<rect class="box" x="20" y="54" width="30" height="30" rx="3"/>
+	<rect class="box-note" x="54" y="54" width="30" height="30" rx="3"/>
+	<rect class="box-note" x="88" y="54" width="30" height="30" rx="3"/>
+	<rect class="box-note" x="122" y="54" width="30" height="30" rx="3"/>
+	<rect class="box-note" x="156" y="54" width="30" height="30" rx="3"/>
+	<rect class="box-note" x="190" y="54" width="30" height="30" rx="3"/>
+	<rect class="box" x="224" y="54" width="30" height="30" rx="3"/>
+	<rect class="box" x="20" y="88" width="30" height="30" rx="3"/>
+	<rect class="box-note" x="54" y="88" width="30" height="30" rx="3"/>
+	<rect class="box-accent" x="88" y="88" width="30" height="30" rx="3"/>
+	<rect class="box-accent" x="122" y="88" width="30" height="30" rx="3"/>
+	<rect class="box-accent" x="156" y="88" width="30" height="30" rx="3"/>
+	<rect class="box-note" x="190" y="88" width="30" height="30" rx="3"/>
+	<rect class="box" x="224" y="88" width="30" height="30" rx="3"/>
+	<rect class="box" x="20" y="122" width="30" height="30" rx="3"/>
+	<rect class="box-note" x="54" y="122" width="30" height="30" rx="3"/>
+	<rect class="box-accent" x="88" y="122" width="30" height="30" rx="3"/>
+	<rect class="box-accent" x="122" y="122" width="30" height="30" rx="3"/>
+	<rect class="box-accent" x="156" y="122" width="30" height="30" rx="3"/>
+	<rect class="box-note" x="190" y="122" width="30" height="30" rx="3"/>
+	<rect class="box" x="224" y="122" width="30" height="30" rx="3"/>
+	<rect class="box" x="20" y="156" width="30" height="30" rx="3"/>
+	<rect class="box-note" x="54" y="156" width="30" height="30" rx="3"/>
+	<rect class="box-accent" x="88" y="156" width="30" height="30" rx="3"/>
+	<rect class="box-accent" x="122" y="156" width="30" height="30" rx="3"/>
+	<rect class="box-accent" x="156" y="156" width="30" height="30" rx="3"/>
+	<rect class="box-note" x="190" y="156" width="30" height="30" rx="3"/>
+	<rect class="box" x="224" y="156" width="30" height="30" rx="3"/>
+	<rect class="box" x="20" y="190" width="30" height="30" rx="3"/>
+	<rect class="box-note" x="54" y="190" width="30" height="30" rx="3"/>
+	<rect class="box-note" x="88" y="190" width="30" height="30" rx="3"/>
+	<rect class="box-note" x="122" y="190" width="30" height="30" rx="3"/>
+	<rect class="box-note" x="156" y="190" width="30" height="30" rx="3"/>
+	<rect class="box-note" x="190" y="190" width="30" height="30" rx="3"/>
+	<rect class="box" x="224" y="190" width="30" height="30" rx="3"/>
+	<rect class="box" x="20" y="224" width="30" height="30" rx="3"/>
+	<rect class="box" x="54" y="224" width="30" height="30" rx="3"/>
+	<rect class="box" x="88" y="224" width="30" height="30" rx="3"/>
+	<rect class="box" x="122" y="224" width="30" height="30" rx="3"/>
+	<rect class="box" x="156" y="224" width="30" height="30" rx="3"/>
+	<rect class="box" x="190" y="224" width="30" height="30" rx="3"/>
+	<rect class="box" x="224" y="224" width="30" height="30" rx="3"/>
+	<circle cx="137" cy="137" r="7" class="line-accent" fill="none"/>
+	<rect class="box-accent" x="290" y="40" width="18" height="18" rx="3"/>
+	<text x="318" y="54" class="strong">로드됨 (풀 디테일)</text>
+	<rect class="box-note" x="290" y="80" width="18" height="18" rx="3"/>
+	<text x="318" y="94">미리 불러오는 중 (prefetch)</text>
+	<rect class="box" x="290" y="120" width="18" height="18" rx="3"/>
+	<text x="318" y="134">언로드 / 저해상도 대리(HLOD)만</text>
+	<circle cx="299" cy="169" r="7" class="line-accent" fill="none"/>
+	<text x="318" y="174">플레이어 (streaming source)</text>
+	<text x="290" y="220" class="dim">플레이어가 움직이면 링 전체가 따라 이동:</text>
+	<text x="290" y="240" class="dim">앞쪽 셀은 올리고, 뒤쪽 셀은 내린다</text>
+</svg>
+</div>
+
+<h4>겹쳐 있는 스트리밍 층</h4>
+<div class="table-wrap"><table>
+	<tr><th>층</th><th>단위</th><th>무엇을 기준으로</th></tr>
+	<tr><td>월드 셀 스트리밍</td><td>그리드 셀 (액터, 메시, 충돌)</td><td>플레이어와의 거리</td></tr>
+	<tr><td>HLOD</td><td>여러 셀을 합친 저폴리 대리 모델</td><td>멀리 있는 셀도 "보이긴" 해야 하니까. 실제 셀은 내리고 대리 모델만 남김</td></tr>
+	<tr><td>메시 LOD</td><td>같은 메시의 디테일 단계</td><td>화면에서 차지하는 크기</td></tr>
+	<tr><td>텍스처 밉 스트리밍</td><td>밉맵 레벨</td><td>화면에 필요한 해상도. 멀면 작은 밉만 VRAM에</td></tr>
+	<tr><td>가상 텍스처 / Nanite</td><td>타일, 클러스터 페이지 (수십 KB)</td><td>GPU가 "이번 프레임에 실제로 쓴 조각"을 피드백</td></tr>
+</table></div>
+<p>즉 거리 기반 그리드는 바깥 틀이고, 안쪽에서는 <strong>화면에 실제로 얼마나 크게 보이는지</strong>에 따라 더 잘게 올리고 내린다. 같은 셀 안의 메시라도 멀면 LOD와 작은 밉만 VRAM에 있다.</p>
+
+<h4>RAM과 VRAM은 따로 관리된다</h4>
+<p>"올린다"는 실제로 두 단계다: <strong>디스크 → 시스템 RAM</strong>(비동기 파일 읽기, 압축 해제) → <strong>RAM → VRAM</strong>(위에서 본 staging + 복사 큐). RAM 쪽 로딩 범위를 VRAM보다 넓게 잡아 두면, 플레이어가 다가올 때 디스크를 기다리지 않고 VRAM 업로드만 하면 된다. DirectStorage는 이 두 단계를 줄여 디스크에서 GPU로 바로 보내고 압축 해제도 GPU가 한다.</p>
+
+<h4>끊김 없이 하기 위한 장치</h4>
+<ul>
+	<li><strong>미리 불러오기</strong>: 로딩 범위를 보이는 범위보다 넓게 잡고, 이동 방향과 속도로 다음 셀을 예측한다(차를 타면 범위를 늘림).</li>
+	<li><strong>히스테리시스</strong>: 올리는 거리 &lt; 내리는 거리로 둔다. 경계에서 왔다 갔다 해도 같은 셀을 계속 올렸다 내렸다 하지 않는다.</li>
+	<li><strong>예산과 우선순위</strong>: <code>QueryVideoMemoryInfo</code>로 VRAM 예산을 보고, 넘으면 가장 오래 안 쓴(LRU) 또는 가장 먼 것부터 내린다.</li>
+	<li><strong>프레임당 업로드 상한</strong>: 한 프레임에 몇 MB까지만 복사해서 프레임 시간이 튀지 않게 한다.</li>
+	<li><strong>메모리 풀</strong>: 리소스마다 <code>CreateCommittedResource</code>를 부르지 않고, 큰 힙을 미리 잡아 두고 <code>CreatePlacedResource</code>로 그 안에 배치한다. 생성/해제 비용과 단편화를 줄인다. 아주 잘게 나누는 경우(가상 텍스처)는 reserved(tiled) 리소스로 64KB 타일 단위로 메모리를 붙였다 뗀다.</li>
+	<li><strong>안전한 해제</strong>: 내리기로 한 버퍼도 GPU가 아직 그 프레임을 그리는 중일 수 있으므로, 펜스로 그 프레임이 끝난 뒤에 해제한다(인스턴스 버퍼를 프레임별로 둔 것과 같은 이유).</li>
+</ul>
+
+<div class="callout key">
+	<span class="label">정리</span>
+	오픈 월드 = 거리 기반 셀 스트리밍(바깥 틀) + 멀리 보이는 곳은 HLOD + 화면 크기 기반 LOD / 밉 / 페이지 스트리밍(안쪽). 모두 비동기로, 예산 안에서, 미리 불러오고 늦게 내린다.
+</div>
 </section>
 
 <!--CHAPTERS-END: 새 장(section)은 이 줄 바로 위에 추가 (형식은 tools/build_note.py 참고)-->
