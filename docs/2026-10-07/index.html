@@ -1671,6 +1671,52 @@ buf-&gt;Map(0, &amp;r, &amp;p2);     // 새로 연결 → p2 != p1 일 수 있�
 	<span class="label">정리</span>
 	지금 파이프라인(입력 레이아웃 + 인덱스 그리기)에서는 "버퍼 생성(크기 지정) → 데이터 복사 → <code>GetGPUVirtualAddress</code> + 오프셋 / 크기 / stride·포맷으로 VBV·IBV 채우기"가 맞는 흐름이다. 시작 주소는 받는 값이고, 내가 정하는 건 그 안의 오프셋이다.
 </div>
+
+<h3>정적 메시는 무조건 UPLOAD → DEFAULT 복사인가</h3>
+<p class="qa">정적 메쉬는 그러면 무조건 upload힙으로 만들고 default힙으로 복사해서 gpu버퍼에 계속 올려두는게 맞는거야?</p>
+<p><strong>외장 GPU에서는 그게 기본값</strong>이다. 다만 "무조건"은 아니고, "UPLOAD 버퍼"와 "계속 올려 둔다"에도 조금 더 붙는 말이 있다.</p>
+
+<div class="diagram" role="img" aria-label="정적 메시 업로드 흐름: CPU 메모리에서 UPLOAD 임시 버퍼로 memcpy, GPU가 CopyBufferRegion으로 DEFAULT 버퍼에 복사, 펜스 대기 후 임시 버퍼 해제, DEFAULT 버퍼는 계속 사용">
+<svg viewBox="0 0 680 170" xmlns="http://www.w3.org/2000/svg">
+	<rect class="box" x="10" y="40" width="140" height="60" rx="6"/>
+	<text x="80" y="66" text-anchor="middle" class="strong">CPU 배열</text>
+	<text x="80" y="86" text-anchor="middle" class="dim">파일에서 읽은 정점</text>
+	<rect class="box-warn" x="250" y="40" width="160" height="60" rx="6"/>
+	<text x="330" y="66" text-anchor="middle" class="strong">UPLOAD (임시)</text>
+	<text x="330" y="86" text-anchor="middle" class="dim">시스템 RAM</text>
+	<rect class="box-accent" x="510" y="40" width="160" height="60" rx="6"/>
+	<text x="590" y="66" text-anchor="middle" class="strong">DEFAULT</text>
+	<text x="590" y="86" text-anchor="middle" class="dim">VRAM, VBV가 가리킴</text>
+	<line class="line" x1="150" y1="70" x2="250" y2="70"/>
+	<text x="200" y="60" text-anchor="middle" class="mono">memcpy</text>
+	<line class="line-accent" x1="410" y1="70" x2="510" y2="70"/>
+	<text x="460" y="60" text-anchor="middle" class="mono">CopyBufferRegion</text>
+	<text x="330" y="130" text-anchor="middle" class="dim">펜스로 복사 완료 확인 후 해제 / 재사용</text>
+	<text x="590" y="130" text-anchor="middle" class="dim">메시를 지울 때까지 유지</text>
+</svg>
+</div>
+
+<div class="table-wrap"><table>
+	<tr><th>상황</th><th>보통 하는 방법</th><th>이유</th></tr>
+	<tr><td>외장 GPU, 정적 메시 (기본)</td><td>UPLOAD 임시 → DEFAULT 복사</td><td>GPU가 수천 프레임 동안 VRAM에서 빠르게 읽음</td></tr>
+	<tr><td>작은 연습용 메시 (지금 큐브)</td><td>UPLOAD에 그대로 둬도 됨</td><td>224바이트라 PCIe 비용이 무의미, 캐시에 남음</td></tr>
+	<tr><td>내장 GPU (UMA)</td><td>복사를 생략할 수 있음</td><td>CPU와 GPU가 같은 RAM을 써서 "VRAM으로 옮기기"의 이득이 없음</td></tr>
+	<tr><td>Resizable BAR 지원 (<code>GPU_UPLOAD</code> 힙)</td><td>CPU가 VRAM에 직접 씀</td><td>임시 버퍼와 복사 명령이 필요 없어짐 (Agility SDK)</td></tr>
+	<tr><td>매 프레임 바뀌는 데이터</td><td>UPLOAD에서 바로 읽음</td><td>12장의 인스턴스 버퍼 경우</td></tr>
+</table></div>
+<p>UMA인지는 <code>CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE)</code>의 <code>UMA</code> / <code>CacheCoherentUMA</code>로 알 수 있다. 하지만 엔진들은 보통 외장 GPU 기준 경로 하나로 통일하고, 내장 GPU에서도 그대로 쓴다. 복사가 낭비이긴 해도 틀리지는 않기 때문이다.</p>
+
+<h4>UPLOAD 버퍼는 메시마다 만드는 게 아니다</h4>
+<p>메시 하나마다 UPLOAD 버퍼를 만들고 지우면 생성 비용(1장에서 본 64KB 정렬 포함)이 반복된다. 실제로는 <strong>큰 임시(staging) 버퍼 하나</strong>를 링 버퍼처럼 돌려 쓴다: 여러 메시의 데이터를 이어 쓰고, 복사 명령을 한꺼번에 기록한 뒤, 펜스로 완료를 확인하면 그 구역을 다시 쓴다. 해제든 재사용이든 <strong>GPU 복사가 끝났다는 펜스 확인 전에는 안 된다</strong>. GPU는 명령 리스트를 나중에 실행하므로 기록 직후에는 아직 복사가 안 된 상태다.</p>
+<p>로딩 중 화면이 멈추지 않게 하려면 이 복사를 <strong>복사 전용 큐</strong>(<code>D3D12_COMMAND_LIST_TYPE_COPY</code>)에서 렌더링과 병렬로 돌리고, 끝났는지 펜스로 확인해서 그릴 때 쓰기 시작한다. 디스크에서 바로 GPU로 보내는 DirectStorage도 같은 흐름의 연장이다.</p>
+
+<h4>"계속 올려 둔다"의 범위</h4>
+<p>DEFAULT 버퍼는 내가 <code>Release</code>할 때까지 남는다. 작은 씬은 시작할 때 다 올려 두면 끝이다. 하지만 오픈 월드처럼 전체가 VRAM에 안 들어가면 <strong>필요한 구역만 올리고 멀어진 구역은 내리는 스트리밍</strong>을 한다. VRAM이 부족하면 OS가 리소스를 시스템 RAM으로 밀어낼 수도 있고, 이때 앱은 <code>Evict</code> / <code>MakeResident</code>와 <code>IDXGIAdapter3::QueryVideoMemoryInfo</code>(예산 확인)로 관리한다.</p>
+
+<div class="callout key">
+	<span class="label">한 줄 요약</span>
+	외장 GPU의 정적 메시: "임시 UPLOAD에 쓰기 → DEFAULT로 GPU 복사 → 펜스 확인 후 임시 구역 해제/재사용 → DEFAULT는 필요한 동안 유지"가 기본이다. 내장 GPU, ReBAR, 아주 작은 데이터는 예외가 될 수 있다.
+</div>
 </section>
 
 <!--CHAPTERS-END: 새 장(section)은 이 줄 바로 위에 추가 (형식은 tools/build_note.py 참고)-->
