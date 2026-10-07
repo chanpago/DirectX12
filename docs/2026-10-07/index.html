@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>카메라와 인스턴싱 · 2026-10-07</title>
-<meta name="description" content="카메라 뷰 행렬과 셰이더 전달 경로, 루트 상수와 상수 버퍼, StructuredBuffer 인스턴싱으로 큐브 100개 그리기, 공용 VB/IB, ExecuteIndirect, UPLOAD 힙과 Map.">
+<meta name="description" content="카메라 뷰 행렬과 셰이더 전달 경로, 루트 상수와 상수 버퍼, StructuredBuffer 인스턴싱으로 큐브 100개 그리기, 공용 VB/IB, ExecuteIndirect, UPLOAD 힙과 Map, 버텍스/인덱스 버퍼 뷰.">
 <meta name="note-title" content="카메라부터 인스턴싱까지">
-<meta name="note-tags" content="Camera, Root Signature, Instancing, SV_InstanceID, ExecuteIndirect, Upload Heap, Map">
+<meta name="note-tags" content="Camera, Root Signature, Instancing, SV_InstanceID, ExecuteIndirect, Upload Heap, Map, Vertex Buffer View">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap">
@@ -38,6 +38,7 @@
 		<li><a href="#heaps">12. UPLOAD / DEFAULT 힙과 업로드</a></li>
 		<li><a href="#map">13. Map의 의미와 persistent mapping</a></li>
 		<li><a href="#next">14. 정리와 다음 단계</a></li>
+		<li><a href="#vbview">15. 버텍스 / 인덱스 버퍼와 뷰: 무엇을 정하고 무엇을 받나</a></li>
 	</ol>
 </nav>
 
@@ -1601,6 +1602,75 @@ buf-&gt;Map(0, &amp;r, &amp;p2);     // 새로 연결 → p2 != p1 일 수 있�
 	<li>조명 도입 시 프레임 상수 버퍼(b0)와 오브젝트 데이터 분리.</li>
 	<li>그 다음: 컴퓨트 셰이더 → GPU 컬링 → <code>ExecuteIndirect</code>.</li>
 </ol>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="vbview">
+<h2><span class="num">15</span>버텍스 / 인덱스 버퍼와 뷰: 무엇을 정하고 무엇을 받나</h2>
+
+<p class="qa">근데 이건 그냥 질문인데 어떤 메쉬를 그리던지간에 CreateUploadBuffer를 통해서 버텍스 버퍼를 할당하고(정확히는 얼만큼의 크기인지, 어느 주소에서 시작하는지 정확하게 결정해야함) 이걸로 버텍스뷰, 인덱스뷰를 만드는게 맞는거지?</p>
+
+<p>큰 흐름은 맞다. <strong>버퍼(메모리)를 만들고 → 데이터를 넣고 → 뷰로 "어디서부터, 얼마나, 어떻게 끊어 읽을지"를 알려 준다.</strong> 지금 코드에서는 <code>Mesh::Init</code>이 그대로 이 순서다.</p>
+<div class="codeblock"><div class="cb-head"><span>DirectX12/Mesh.cpp  L83–103</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">void Mesh::Init(ID3D12Device* device)
+{
+	// 1. 버텍스 버퍼: GPU 메모리 할당 + 정점 데이터 복사
+	m_vertexBuffer = CreateUploadBuffer(device, kCubeVertices, sizeof(kCubeVertices));
+
+	// 2. 버텍스 버퍼 뷰: 어디서, 얼마나, 몇 바이트씩 끊어 읽을지
+	m_vertexBufferView.BufferLocation = m_vertexBuffer-&gt;GetGPUVirtualAddress();
+	m_vertexBufferView.SizeInBytes = static_cast&lt;UINT&gt;(sizeof(kCubeVertices));
+	m_vertexBufferView.StrideInBytes = sizeof(Vertex);
+
+	// 3. 인덱스 버퍼: GPU 메모리 할당 + 인덱스 데이터 복사
+	m_indexBuffer = CreateUploadBuffer(device, kCubeIndices, sizeof(kCubeIndices));
+
+	// 4. 인덱스 버퍼 뷰: 어디서, 얼마나, 인덱스 하나가 몇 비트인지
+	m_indexBufferView.BufferLocation = m_indexBuffer-&gt;GetGPUVirtualAddress();
+	m_indexBufferView.SizeInBytes = static_cast&lt;UINT&gt;(sizeof(kCubeIndices));
+	m_indexBufferView.Format = DXGI_FORMAT_R16_UINT;
+
+	// 5. 드로우할 때 쓸 인덱스 개수
+	m_indexCount = _countof(kCubeIndices);
+}</code></pre></div>
+
+<p>다만 세 가지를 바로잡아 두면 좋다.</p>
+
+<h3>1. 크기는 내가 정하고, 시작 주소는 받는다</h3>
+<p>버퍼를 만들 때 정하는 건 <strong>크기</strong>(<code>desc.Width = size</code>, <code>Mesh.cpp:48</code>)와 힙 종류뿐이다. GPU 메모리의 어디에 놓일지는 <code>CreateCommittedResource</code>가 정하고, 나는 그 결과를 <code>GetGPUVirtualAddress()</code>로 <strong>물어본다</strong>(<code>Mesh.cpp:89</code>).</p>
+<div class="table-wrap"><table>
+	<tr><th>값</th><th>누가 정하나</th><th>어디서</th></tr>
+	<tr><td>버퍼 크기</td><td>나 (데이터 바이트 수)</td><td><code>D3D12_RESOURCE_DESC::Width</code></td></tr>
+	<tr><td>버퍼 시작 주소</td><td>드라이버 / OS</td><td><code>GetGPUVirtualAddress()</code>로 조회</td></tr>
+	<tr><td>뷰 시작 주소</td><td>나</td><td>버퍼 시작 주소 <strong>+ 내가 정한 오프셋</strong></td></tr>
+	<tr><td>뷰 크기</td><td>나</td><td><code>SizeInBytes</code> (버퍼 전체일 필요 없음)</td></tr>
+	<tr><td>한 칸의 크기</td><td>나 (데이터 형식)</td><td>VB: <code>StrideInBytes</code>, IB: <code>Format</code></td></tr>
+</table></div>
+<p>즉 "어느 주소에서 시작하는지"를 정하는 건 <strong>버퍼가 아니라 뷰 쪽</strong>이다. 지금은 메시마다 버퍼를 따로 만들어서 오프셋이 0이라 "버퍼 시작 = 뷰 시작"으로 보일 뿐이다. 10장의 공용 VB/IB처럼 큰 버퍼 하나에 여러 메시를 넣으면, 뷰의 <code>BufferLocation</code>을 <code>base + offset</code>으로 잡거나 뷰는 하나로 두고 Draw의 <code>startIndexLocation</code> / <code>baseVertexLocation</code>으로 위치를 고른다.</p>
+<div class="callout warn">
+	<span class="label">정렬</span>
+	오프셋은 아무 값이나 되지 않는다. 인덱스 버퍼 뷰의 <code>BufferLocation</code>은 인덱스 크기(R16이면 2바이트, R32면 4바이트)의 배수여야 하고, 버텍스 쪽도 4바이트 단위로 맞추는 게 안전하다. <code>CreateCommittedResource</code>로 만든 버퍼 자체는 64KB 경계에서 시작한다(작은 버퍼를 하나씩 만들면 낭비가 큰 이유이기도 하다).
+</div>
+
+<h3>2. 뷰는 디스크립터가 아니다</h3>
+<p>이름이 "뷰"라서 RTV / DSV / SRV와 같은 종류로 보이지만, <code>D3D12_VERTEX_BUFFER_VIEW</code>와 <code>D3D12_INDEX_BUFFER_VIEW</code>는 <strong>힙에 들어가지 않는 그냥 16바이트짜리 구조체</strong>다. 디스크립터 힙도, <code>Create...View</code> 호출도 없다. 멤버만 채워서 <code>IASetVertexBuffers</code> / <code>IASetIndexBuffer</code>에 넘기면 커맨드 리스트에 값이 복사된다. 그래서 <code>Mesh</code>가 멤버 변수로 들고 있다가(<code>Mesh.h:36-37</code>) 그릴 때 참조만 넘긴다.</p>
+<div class="table-wrap"><table>
+	<tr><th></th><th>VBV / IBV</th><th>RTV / DSV / SRV / CBV</th></tr>
+	<tr><td>정체</td><td>CPU 쪽 구조체 (주소 + 크기 + 형식)</td><td>디스크립터 힙 안의 슬롯</td></tr>
+	<tr><td>만드는 법</td><td>멤버 대입</td><td><code>device->Create...View(…, handle)</code></td></tr>
+	<tr><td>넘기는 법</td><td><code>IASet...</code>에 구조체 포인터</td><td>핸들 / 디스크립터 테이블</td></tr>
+</table></div>
+
+<h3>3. "어떤 메시든 반드시"는 아니다</h3>
+<ul>
+	<li><strong>UPLOAD 힙은 지금 코드의 선택일 뿐</strong>이다. 정적인 메시는 보통 12장의 DEFAULT 힙 업로드(임시 UPLOAD 버퍼 → <code>CopyBufferRegion</code> → 배리어)로 올린다. 이 경우에도 뷰에 넣는 건 <strong>DEFAULT 버퍼</strong>의 주소다. 이름이 <code>CreateUploadBuffer</code>인 함수(<code>Mesh.cpp:39</code>)는 그 단계에서 "임시 버퍼 만들기"로 역할이 바뀐다.</li>
+	<li><strong>인덱스 버퍼는 선택</strong>이다. 인덱스 없이 정점을 순서대로 쓰면 IBV 없이 <code>DrawInstanced</code>로 그린다. 정점 공유가 없어 정점 수가 늘어나는 대신 단순하다.</li>
+	<li><strong>버텍스 버퍼도 선택</strong>이다. 입력 레이아웃을 비우고 VS에서 <code>SV_VertexID</code>로 StructuredBuffer를 직접 읽을 수도 있다(vertex pulling). 사실 인스턴스 데이터는 이미 이 방식이다: VBV 없이 루트 SRV로 넘기고 <code>g_instances[instanceId]</code>로 읽는다(<code>BasicVS.hlsl:23</code>). 전체 화면 삼각형처럼 아예 버퍼 없이 <code>SV_VertexID</code>로 좌표를 계산하는 경우도 있다.</li>
+</ul>
+
+<div class="callout key">
+	<span class="label">정리</span>
+	지금 파이프라인(입력 레이아웃 + 인덱스 그리기)에서는 "버퍼 생성(크기 지정) → 데이터 복사 → <code>GetGPUVirtualAddress</code> + 오프셋 / 크기 / stride·포맷으로 VBV·IBV 채우기"가 맞는 흐름이다. 시작 주소는 받는 값이고, 내가 정하는 건 그 안의 오프셋이다.
+</div>
 </section>
 
 <!--CHAPTERS-END: 새 장(section)은 이 줄 바로 위에 추가 (형식은 tools/build_note.py 참고)-->
