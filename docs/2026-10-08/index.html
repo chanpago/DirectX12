@@ -236,6 +236,25 @@ cube.ReleaseUploadBuffers();</code></pre></div>
 	<code>Close</code>는 "기록 끝"이지 "실행"이 아니다. Close만 하고 <code>ExecuteCommandLists</code>를 안 하면 기록한 복사 명령은 다음 <code>Reset</code> 때 그냥 버려진다. 에러는 안 나지만 DEFAULT 버퍼는 빈 채로 남아 큐브가 안 그려진다. 그래서 루프 전에 <strong>Close → Execute → 펜스 대기</strong> 세 가지가 한 묶음이다.
 </div>
 
+<h4>정확히 어떤 호출 전인가</h4>
+<p class="qa">아니근데 정확하게 루프전이 아니라 어떤 명령어 전에 해야하는거야?</p>
+<p>정확한 기준은 첫 <code>BeginFrame</code> 안의 <strong><code>CommandAllocator->Reset()</code>(<code>GraphicsDevice.cpp:266</code>)</strong>이다. 리스트 Reset(267줄)보다 한 줄 앞이다.</p>
+<p>이유는 할당자가 겹치기 때문이다.</p>
+<ul>
+	<li>리스트는 <code>m_frameContexts[0]</code>의 할당자로 만들어졌다(<code>GraphicsDevice.cpp:74-75</code>). 그래서 업로드 명령은 할당자 0의 메모리에 기록된다.</li>
+	<li>첫 프레임은 <code>m_frameIndex = 0</code>이라 <code>WaitForNextFrameContext</code>가 <strong>같은 할당자 0</strong>을 고른다(<code>GraphicsDevice.cpp:225</code>).</li>
+	<li>그 할당자의 <code>FenceValue</code>는 아직 0이라 226줄의 대기는 그냥 통과한다. 즉 <code>BeginFrame</code>은 업로드를 기다려 주지 않는다.</li>
+	<li>그리고 266줄에서 할당자 0을 Reset한다. 할당자를 Reset하면 그 안에 기록된 명령 메모리를 비운다.</li>
+</ul>
+<div class="table-wrap"><table>
+	<tr><th>266줄 시점에 업로드가</th><th>결과</th></tr>
+	<tr><td>Close 안 됨 (아직 기록 중)</td><td>디버그 레이어 에러: 기록 중인 리스트가 쓰는 할당자는 Reset할 수 없음</td></tr>
+	<tr><td>Close만 됨, Execute 안 됨</td><td>에러 없음. 복사 명령이 그냥 지워짐 → DEFAULT 버퍼가 빈 채로 남아 큐브가 안 보임</td></tr>
+	<tr><td>Execute는 됨, 대기 안 함</td><td>GPU가 아직 그 명령을 실행 중일 수 있음 → "실행 중인 할당자를 Reset" 에러</td></tr>
+	<tr><td>Close → Execute → <code>WaitForGpu</code> 완료</td><td>정상</td></tr>
+</table></div>
+<p>정리하면 <strong>Close → Execute → <code>WaitForGpu</code>를 전부 <code>GraphicsDevice.cpp:266</code> 전에</strong> 끝내야 한다. 그 사이의 <code>instanceBuffer.Init</code>, <code>rootSignature.Init</code>, PSO, ImGui 초기화는 디바이스만 쓰고 이 리스트를 건드리지 않으므로, 이 세 줄은 <code>cube.Init</code> 바로 뒤에 둬도 되고 루프 직전에 둬도 된다. 별도로 <code>ReleaseUploadBuffers()</code>는 <code>WaitForGpu</code> <strong>뒤</strong>여야 한다.</p>
+
 <div class="callout key">
 	<span class="label">결론</span>
 	둘 다 맞는 방법이다. 지금처럼 시작할 때 큐브 하나만 올린다면 Close를 지우는 쪽이 제일 짧다. "열기 → 기록 → 닫기 + 실행 + 대기"라는 짝을 함수로 보이게 하고 나중에도 쓰려면 <code>BeginUpload</code> / <code>EndUpload</code>가 낫다. 어느 쪽이든 2~4번(DEFAULT 버퍼, 배리어, 펜스 대기 후 임시 버퍼 해제)은 똑같다.
