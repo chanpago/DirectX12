@@ -150,6 +150,42 @@ instanceBuffer.Init(...);              // 이하 그대로</code></pre></div>
 	<span class="label">핵심</span>
 	커맨드 리스트에 기록하는 것과 GPU가 실행하는 것은 다른 시점이다. 그래서 (1) 복사 전후로 상태를 알려 주는 배리어, (2) 복사가 끝났는지 확인하는 펜스, (3) 그때까지 임시 버퍼를 살려 두는 수명 관리가 필요하다.
 </div>
+
+<h3>1번(초기화용 커맨드 리스트)은 왜 필요한가</h3>
+<p class="qa">1,2,3,4 다중요하긴한데 1번이 왜 필요하다고?</p>
+<p>한 줄로: <strong>복사(<code>CopyBufferRegion</code>)와 배리어(<code>ResourceBarrier</code>)는 GPU가 하는 일이라서, 커맨드 리스트에 기록해서 큐로 보내는 방법밖에 없기 때문</strong>이다. 그런데 초기화 시점에는 열려 있는 커맨드 리스트가 없다.</p>
+
+<h4>디바이스가 하는 일과 커맨드 리스트가 하는 일</h4>
+<div class="table-wrap"><table>
+	<tr><th></th><th>누가 호출</th><th>언제 일어나나</th><th>예</th></tr>
+	<tr><td>생성</td><td><code>ID3D12Device</code></td><td>호출하는 그 자리에서 (CPU)</td><td><code>CreateCommittedResource</code>, <code>CreateRootSignature</code>, PSO 생성</td></tr>
+	<tr><td>CPU가 메모리에 쓰기</td><td><code>ID3D12Resource::Map</code> + memcpy</td><td>그 자리에서 (CPU)</td><td><code>Mesh.cpp:66-74</code></td></tr>
+	<tr><td>GPU 작업</td><td><code>ID3D12GraphicsCommandList</code></td><td>기록만 해 두고, 큐에 제출한 뒤 GPU가 나중에 실행</td><td><code>CopyBufferRegion</code>, <code>ResourceBarrier</code>, <code>Clear</code>, <code>Draw</code></td></tr>
+</table></div>
+<p>지금 코드에 커맨드 리스트가 필요 없었던 이유가 여기 있다. UPLOAD 버퍼는 CPU가 Map해서 직접 쓰니까 생성 + memcpy로 끝난다(위 표의 1, 2행). 하지만 DEFAULT 힙은 CPU가 Map할 수 없으므로 "UPLOAD에서 DEFAULT로 옮겨라"를 <strong>GPU에게 시켜야</strong> 하고(3행), GPU에게 일을 시키는 유일한 통로가 커맨드 리스트 → 큐다.</p>
+
+<h4>왜 지금 있는 리스트를 그냥 못 쓰나</h4>
+<p>커맨드 리스트는 <strong>열림(기록 중) / 닫힘</strong> 두 상태가 있고, 열려 있을 때만 명령을 기록할 수 있다.</p>
+<ul>
+	<li><code>GraphicsDevice.cpp:74-76</code>: 리스트를 만들자마자 <code>Close()</code>한다. 그래서 <code>gfx.Init</code> 이후 <code>cube.Init</code> 시점에는 <strong>닫혀</strong> 있다.</li>
+	<li>리스트가 열리는 곳은 <code>BeginFrame</code>의 <code>Reset</code>뿐이다(<code>GraphicsDevice.cpp:266-267</code>). 루프에 들어가야 열린다.</li>
+	<li>열려면 <code>m_commandList->Reset(할당자, nullptr)</code>가 필요하고, 그 전에 할당자도 <code>Reset</code>해야 한다. 할당자는 기록된 명령이 실제로 저장되는 메모리다. 그런데 할당자와 리스트가 둘 다 <code>GraphicsDevice</code>의 <code>private</code> 멤버라 main이나 <code>Mesh</code>에서는 손댈 수 없다.</li>
+</ul>
+<p>그래서 <code>BeginFrame</code>에서 하는 "할당자 Reset → 리스트 Reset"을, 프레임 밖에서 할 수 있게 열어 주는 것이 <code>BeginUpload</code>다. 그리고 <code>EndFrame</code>이 "Close → Execute → Present → Signal"을 하듯이, <code>EndUpload</code>는 Present 없이 "Close → Execute → 펜스 대기"만 한다.</p>
+<div class="table-wrap"><table>
+	<tr><th></th><th>프레임용 (있음)</th><th>초기화용 (추가)</th></tr>
+	<tr><td>열기</td><td><code>BeginFrame</code>: 할당자 Reset + 리스트 Reset + 백버퍼 배리어 + 클리어...</td><td><code>BeginUpload</code>: 할당자 Reset + 리스트 Reset</td></tr>
+	<tr><td>닫기</td><td><code>EndFrame</code>: Close + Execute + Present + Signal (기다리지 않음)</td><td><code>EndUpload</code>: Close + Execute + <strong>완료까지 기다림</strong></td></tr>
+</table></div>
+<p><code>EndUpload</code>가 기다리는 이유는 3번(임시 버퍼 수명) 때문이다. 기다려야 그 다음 줄에서 임시 버퍼를 지워도 안전하다. 초기화는 한 번뿐이라 CPU가 잠깐 멈춰도 문제없다.</p>
+
+<h4>할당자를 아무거나 Reset해도 되나</h4>
+<p>할당자는 GPU가 그 안의 명령을 다 실행한 뒤에만 Reset할 수 있다. 초기화 시점에는 아직 아무것도 제출하지 않았으므로 <code>m_frameContexts[0]</code>의 할당자를 써도 안전하다. 그리고 <code>EndUpload</code>가 GPU 완료까지 기다리므로, 이후 첫 <code>BeginFrame</code>이 같은 할당자를 다시 Reset해도 문제없다.</p>
+
+<div class="callout">
+	<span class="label">다른 방법</span>
+	첫 프레임의 <code>BeginFrame</code>이 연 리스트에 복사를 끼워 넣을 수도 있다. 하지만 그러면 메시 준비가 렌더 루프에 섞이고, 임시 버퍼를 언제 지울지(그 프레임의 펜스가 끝난 뒤) 따로 추적해야 한다. 초기화 때 별도로 열고 기다리는 쪽이 단순하다. 나중에 로딩 중 멈춤이 문제가 되면, 업로드 전용 할당자 / 리스트 / 복사 큐를 따로 두는 쪽으로 발전시킨다(10-07 노트 15장).
+</div>
 </section>
 
 <!--CHAPTERS-END: 새 장(section)은 이 줄 바로 위에 추가 (형식은 tools/build_note.py 참고)-->
