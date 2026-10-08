@@ -218,6 +218,24 @@ cube.ReleaseUploadBuffers();</code></pre></div>
 	<tr><td>게임 도중 다시 업로드</td><td>불가 (다른 함수 필요)</td><td>가능</td></tr>
 </table></div>
 
+<h4>그러니까 루프 전에 닫아야 한다는 것인가</h4>
+<p class="qa">그러니까 너 말은 루프 들어가기저에 close해야한다는거야?</p>
+<p>그렇다. 정확히는 <strong>첫 <code>BeginFrame</code> 전에</strong>다. 규칙은 하나다: <code>ID3D12GraphicsCommandList::Reset</code>은 <strong>닫힌 리스트에만</strong> 호출할 수 있다. <code>BeginFrame</code>이 매 프레임 <code>Reset</code>(<code>GraphicsDevice.cpp:267</code>)으로 시작하므로, 루프에 들어갈 때 리스트는 닫혀 있어야 한다.</p>
+<p>지금 <code>GraphicsDevice.cpp:76</code>에 <code>Close()</code>가 있는 이유가 바로 이것이다. 그 줄을 지운다는 건 "닫는 시점을 Init 끝에서 루프 직전으로 옮긴다"는 뜻이다.</p>
+<div class="table-wrap"><table>
+	<tr><th>리스트 상태 흐름</th><th>지금</th><th>Close를 지우면</th></tr>
+	<tr><td><code>CreateCommandList</code></td><td>열림</td><td>열림</td></tr>
+	<tr><td><code>gfx.Init</code> 끝</td><td>닫힘 (76줄)</td><td><strong>열림</strong></td></tr>
+	<tr><td><code>cube.Init</code></td><td>(리스트 안 씀)</td><td>복사 명령 기록</td></tr>
+	<tr><td>루프 직전</td><td>닫힘</td><td><strong>Close + Execute + WaitForGpu</strong></td></tr>
+	<tr><td>매 프레임 <code>BeginFrame</code></td><td>Reset → 열림</td><td>Reset → 열림</td></tr>
+	<tr><td>매 프레임 <code>EndFrame</code></td><td>Close → Execute</td><td>Close → Execute</td></tr>
+</table></div>
+<div class="callout warn">
+	<span class="label">Close만으로는 부족하다</span>
+	<code>Close</code>는 "기록 끝"이지 "실행"이 아니다. Close만 하고 <code>ExecuteCommandLists</code>를 안 하면 기록한 복사 명령은 다음 <code>Reset</code> 때 그냥 버려진다. 에러는 안 나지만 DEFAULT 버퍼는 빈 채로 남아 큐브가 안 그려진다. 그래서 루프 전에 <strong>Close → Execute → 펜스 대기</strong> 세 가지가 한 묶음이다.
+</div>
+
 <div class="callout key">
 	<span class="label">결론</span>
 	둘 다 맞는 방법이다. 지금처럼 시작할 때 큐브 하나만 올린다면 Close를 지우는 쪽이 제일 짧다. "열기 → 기록 → 닫기 + 실행 + 대기"라는 짝을 함수로 보이게 하고 나중에도 쓰려면 <code>BeginUpload</code> / <code>EndUpload</code>가 낫다. 어느 쪽이든 2~4번(DEFAULT 버퍼, 배리어, 펜스 대기 후 임시 버퍼 해제)은 똑같다.
