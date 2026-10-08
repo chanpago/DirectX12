@@ -276,6 +276,28 @@ cube.ReleaseUploadBuffers();</code></pre></div>
 </div>
 <p>업로드 흐름에 대입하면 <code>Close → Execute → WaitForGpu → (첫 BeginFrame) 할당자 Reset → 리스트 Reset</code>이 되어 위 조건을 모두 만족한다. 참고로 <code>CreateCommandList</code>는 리스트를 <strong>열린 상태</strong>로 만들기 때문에 <code>GraphicsDevice.cpp:76</code>에서 바로 Close하는 것이고, 처음부터 닫힌 상태로 만드는 <code>ID3D12Device4::CreateCommandList1</code>도 있다.</p>
 
+<h4>최종 순서 확인: InstanceBuffer가 아니라 Mesh</h4>
+<p class="qa">그러면 일단 gfx init에서 close안하고 instancebuffer에서 default heap생성해서 upload힙 복사하고 나서 루프 들어가기 전에 close하면되는거아냐?</p>
+<p>흐름은 맞고, 두 군데만 고치면 된다.</p>
+<ol>
+	<li><strong>DEFAULT로 옮기는 건 <code>InstanceBuffer</code>가 아니라 <code>Mesh</code>(큐브 VB/IB)</strong>다. 인스턴스 버퍼는 매 프레임 CPU가 새로 쓰는 데이터라서 UPLOAD에서 바로 읽는 게 맞다(10-07 노트 12장 "인스턴스 버퍼는 왜 DEFAULT로 복사하지 않나"). 한 번 올리고 계속 읽는 정적 메시만 DEFAULT로 간다.</li>
+	<li><strong>루프 전에 Close만이 아니라 Close → Execute → <code>WaitForGpu</code> → 임시 버퍼 해제</strong>까지 해야 한다. Close만 하면 복사 명령이 실행되지 않고 버려진다.</li>
+</ol>
+<div class="codeblock"><div class="cb-head"><span>Close를 지운 경우의 최종 순서</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">gfx.Init(hwnd);                    // GraphicsDevice.cpp:76의 Close() 삭제 → 열린 채로 끝남
+cube.Init(gfx.Device(), gfx.CommandList());   // DEFAULT 버퍼 + 배리어 + CopyBufferRegion 기록
+instanceBuffer.Init(...);          // 그대로 (UPLOAD)
+rootSignature.Init(...);           // 그대로
+basicPipeline.Init(...);           // 그대로
+imgui.Init(...);                   // 그대로
+
+// 루프 전 (정확히는 첫 BeginFrame의 할당자 Reset 전)
+gfx.CommandList()-&gt;Close();
+ExecuteCommandLists(...);
+gfx.WaitForGpu();
+cube.ReleaseUploadBuffers();
+
+while (PumpMessages()) { ... }</code></pre></div>
+
 <div class="callout key">
 	<span class="label">결론</span>
 	둘 다 맞는 방법이다. 지금처럼 시작할 때 큐브 하나만 올린다면 Close를 지우는 쪽이 제일 짧다. "열기 → 기록 → 닫기 + 실행 + 대기"라는 짝을 함수로 보이게 하고 나중에도 쓰려면 <code>BeginUpload</code> / <code>EndUpload</code>가 낫다. 어느 쪽이든 2~4번(DEFAULT 버퍼, 배리어, 펜스 대기 후 임시 버퍼 해제)은 똑같다.
