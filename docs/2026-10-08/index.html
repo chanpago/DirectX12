@@ -298,6 +298,18 @@ cube.ReleaseUploadBuffers();
 
 while (PumpMessages()) { ... }</code></pre></div>
 
+<h4>무엇을 DEFAULT에 두나: 누가, 얼마나 자주 쓰나</h4>
+<p class="qa">아 그러니까 인스턴스 버퍼쪽은 world행렬 가지고있는 친구들인데 얘들은 뭐 컴퓨트 셰이더로 처리하지않는이상 그냥 cpu에서 값을 업로드 해줘야하니까 디폴트로 vram에 업로드 할 수 없는거고 버텍스버퍼, 인덱스 버퍼는 그냥 어차피 안바뀌니까 디폴트로 쓰지 이거지?</p>
+<p>맞다. 한 가지만 다듬으면, 인스턴스 버퍼도 DEFAULT로 올리는 게 <strong>불가능한 건 아니고 이득이 없는 것</strong>이다. 매 프레임 임시 UPLOAD 버퍼 → 복사 → 배리어를 하면 된다. 다만 GPU가 그 프레임에 한 번 읽고 버리는 데이터라, 결국 UPLOAD에서 한 번 읽는 것과 같은 PCIe 전송에 복사 단계만 더해진다.</p>
+<p>컴퓨트 셰이더 이야기는 정확히 맞다. 그 경우는 반대로 <strong>DEFAULT가 필수</strong>가 된다.</p>
+<div class="table-wrap"><table>
+	<tr><th>데이터</th><th>누가 쓰나</th><th>얼마나 자주</th><th>힙</th></tr>
+	<tr><td>큐브 VB/IB</td><td>CPU (시작할 때 한 번)</td><td>안 바뀜</td><td><strong>DEFAULT</strong> (임시 UPLOAD로 한 번 복사)</td></tr>
+	<tr><td>인스턴스 World (지금)</td><td>CPU (<code>BuildInstances</code>)</td><td>매 프레임</td><td><strong>UPLOAD</strong>에서 바로 읽음</td></tr>
+	<tr><td>인스턴스 World (컴퓨트로 계산)</td><td>GPU (컴퓨트 셰이더가 UAV로 씀)</td><td>매 프레임</td><td><strong>DEFAULT</strong> 필수. UPLOAD 힙에는 UAV를 만들 수 없음. CPU 업로드가 아예 없어짐</td></tr>
+</table></div>
+<p>즉 기준은 "바뀌냐 안 바뀌냐" 하나가 아니라 <strong>누가 쓰고(CPU / GPU), 얼마나 자주 쓰고, GPU가 몇 번 읽나</strong>다. CPU가 자주 쓰면 UPLOAD, CPU가 한 번 쓰고 GPU가 오래 읽으면 DEFAULT로 복사, GPU가 쓰면 DEFAULT.</p>
+
 <div class="callout key">
 	<span class="label">결론</span>
 	둘 다 맞는 방법이다. 지금처럼 시작할 때 큐브 하나만 올린다면 Close를 지우는 쪽이 제일 짧다. "열기 → 기록 → 닫기 + 실행 + 대기"라는 짝을 함수로 보이게 하고 나중에도 쓰려면 <code>BeginUpload</code> / <code>EndUpload</code>가 낫다. 어느 쪽이든 2~4번(DEFAULT 버퍼, 배리어, 펜스 대기 후 임시 버퍼 해제)은 똑같다.
