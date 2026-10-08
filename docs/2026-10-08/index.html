@@ -323,6 +323,56 @@ while (PumpMessages()) { ... }</code></pre></div>
 </table></div>
 <p>큐브 하나라면 B도 동작하고, 임시 버퍼를 멤버로 둘 필요가 없어져 오히려 코드가 짧다. 하지만 메시가 하나만 늘어나도 바로 깨지는 구조라, 기록(<code>Mesh</code>)과 제출·대기(<code>GraphicsDevice</code> / main)를 나누는 A를 권한다. 커맨드 리스트를 쓰는 다른 코드도 대부분 이렇게 나뉜다: 렌더 코드는 리스트에 기록만 하고, <code>EndFrame</code>이 닫고 제출한다.</p>
 
+<h4>Close → Execute → 대기는 각각 왜 필요한가</h4>
+<p class="qa">Close → Execute → 대기는 왜 해야하는건데?</p>
+<p>출발점은 하나다: <strong>커맨드 리스트에 기록하는 것과 GPU가 실행하는 것은 다른 시점이다.</strong> <code>CopyBufferRegion</code>을 호출하는 순간 복사가 일어나는 게 아니라 "복사하라"는 메모가 할당자 메모리에 적힐 뿐이다. 세 단계는 그 메모를 GPU에게 넘기고, 끝났는지 확인하는 과정이다.</p>
+<div class="table-wrap"><table>
+	<tr><th>단계</th><th>하는 일</th><th>빼먹으면</th></tr>
+	<tr><td><strong>Close</strong></td><td>"기록 끝". 리스트를 실행 가능한 상태로 확정한다</td><td><code>ExecuteCommandLists</code>는 닫힌 리스트만 받는다. 열린 리스트를 넘기면 에러</td></tr>
+	<tr><td><strong>Execute</strong></td><td>리스트를 큐에 넣어 GPU에 제출한다</td><td>GPU는 그 명령을 영영 모른다. 다음 Reset 때 메모가 버려지고 DEFAULT 버퍼는 빈 채로 남는다</td></tr>
+	<tr><td><strong>대기</strong> (Signal + 펜스)</td><td>GPU가 실제로 복사를 끝낼 때까지 CPU가 기다린다</td><td>아래 두 가지가 GPU 작업 중에 일어난다</td></tr>
+</table></div>
+
+<p><code>ExecuteCommandLists</code>는 제출만 하고 <strong>바로 돌아온다</strong>. GPU는 그 뒤에 자기 속도로 실행한다. 그래서 CPU가 "복사가 끝났다"고 믿고 해야 하는 일이 있으면 기다려야 한다. 이번에는 두 가지다.</p>
+<ol>
+	<li><strong>임시 UPLOAD 버퍼 해제</strong> (<code>ReleaseUploadBuffers</code>): GPU가 그 버퍼에서 읽어 복사하는 중인데 CPU가 지우면, GPU가 해제된 메모리를 읽는다.</li>
+	<li><strong>할당자 Reset</strong> (첫 <code>BeginFrame</code>, <code>GraphicsDevice.cpp:266</code>): GPU가 아직 할당자 0에 적힌 복사 명령을 읽는 중인데 CPU가 그 메모리를 비우면 안 된다.</li>
+</ol>
+
+<div class="diagram" role="img" aria-label="CPU와 GPU 타임라인: CPU가 기록, Close, Execute 후 바로 다음 줄로 진행. GPU는 Execute 이후에 복사를 실행. 대기가 없으면 CPU의 임시 버퍼 해제가 GPU 복사와 겹친다. 대기가 있으면 GPU 복사가 끝난 뒤에 해제한다">
+<svg viewBox="0 0 680 220" xmlns="http://www.w3.org/2000/svg">
+	<text x="20" y="48" class="strong">CPU</text>
+	<text x="20" y="98" class="strong">GPU</text>
+	<rect class="box" x="70" y="30" width="110" height="28" rx="4"/>
+	<text x="125" y="49" text-anchor="middle">기록</text>
+	<rect class="box" x="185" y="30" width="60" height="28" rx="4"/>
+	<text x="215" y="49" text-anchor="middle">Close</text>
+	<rect class="box" x="250" y="30" width="70" height="28" rx="4"/>
+	<text x="285" y="49" text-anchor="middle">Execute</text>
+	<rect class="box-warn" x="325" y="30" width="110" height="28" rx="4"/>
+	<text x="380" y="49" text-anchor="middle">임시 버퍼 해제</text>
+	<rect class="box-accent" x="300" y="80" width="200" height="28" rx="4"/>
+	<text x="400" y="99" text-anchor="middle">CopyBufferRegion 실행 중</text>
+	<line class="line" x1="285" y1="58" x2="300" y2="80"/>
+	<text x="440" y="130" text-anchor="middle" class="dim">대기 없음: 해제가 GPU 복사와 겹친다 → 해제된 메모리를 읽음</text>
+
+	<text x="20" y="168" class="strong">CPU</text>
+	<rect class="box" x="70" y="150" width="250" height="28" rx="4"/>
+	<text x="195" y="169" text-anchor="middle">기록 → Close → Execute</text>
+	<rect class="box-note" x="325" y="150" width="175" height="28" rx="4"/>
+	<text x="412" y="169" text-anchor="middle">WaitForGpu (멈춤)</text>
+	<rect class="box" x="505" y="150" width="110" height="28" rx="4"/>
+	<text x="560" y="169" text-anchor="middle">임시 버퍼 해제</text>
+	<text x="400" y="205" text-anchor="middle" class="dim">대기 있음: GPU 복사(위와 같은 구간)가 끝난 뒤에 해제</text>
+</svg>
+</div>
+
+<div class="callout">
+	<span class="label">대기는 Draw 순서 때문이 아니다</span>
+	같은 큐에 들어간 명령은 넣은 순서대로 실행되고, 복사 뒤 배리어(<code>COPY_DEST → VERTEX_AND_CONSTANT_BUFFER</code>)가 "복사가 끝나야 정점으로 읽을 수 있다"를 GPU 안에서 보장한다. 그래서 복사 직후 첫 프레임의 Draw는 대기가 없어도 올바른 데이터를 읽는다. 펜스 대기는 <strong>CPU 쪽 일(메모리 해제, 할당자 재사용)</strong>을 GPU 진행에 맞추기 위한 것이다. GPU 안의 순서는 배리어, CPU와 GPU 사이의 순서는 펜스가 맡는다.
+</div>
+<p>참고로 대기를 매 프레임 하지 않는 렌더 루프에서는 같은 문제를 "프레임별 할당자 + 그 프레임의 펜스 값을 기억해 두었다가 재사용 전에 확인"(<code>WaitForNextFrameContext</code>)으로 풀고 있다. 초기화는 한 번뿐이라 그냥 끝까지 기다리는 것이 가장 단순하다.</p>
+
 <div class="callout key">
 	<span class="label">결론</span>
 	둘 다 맞는 방법이다. 지금처럼 시작할 때 큐브 하나만 올린다면 Close를 지우는 쪽이 제일 짧다. "열기 → 기록 → 닫기 + 실행 + 대기"라는 짝을 함수로 보이게 하고 나중에도 쓰려면 <code>BeginUpload</code> / <code>EndUpload</code>가 낫다. 어느 쪽이든 2~4번(DEFAULT 버퍼, 배리어, 펜스 대기 후 임시 버퍼 해제)은 똑같다.
