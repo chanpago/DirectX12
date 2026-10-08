@@ -186,6 +186,42 @@ instanceBuffer.Init(...);              // 이하 그대로</code></pre></div>
 	<span class="label">다른 방법</span>
 	첫 프레임의 <code>BeginFrame</code>이 연 리스트에 복사를 끼워 넣을 수도 있다. 하지만 그러면 메시 준비가 렌더 루프에 섞이고, 임시 버퍼를 언제 지울지(그 프레임의 펜스가 끝난 뒤) 따로 추적해야 한다. 초기화 때 별도로 열고 기다리는 쪽이 단순하다. 나중에 로딩 중 멈춤이 문제가 되면, 업로드 전용 할당자 / 리스트 / 복사 큐를 따로 두는 쪽으로 발전시킨다(10-07 노트 15장).
 </div>
+
+<h3>그냥 Init에서 Close를 안 하면 되지 않나</h3>
+<p class="qa">아니 그러면 gfx.init에서 그냥 close안하면 되는거아냐?</p>
+<p><strong>된다.</strong> 실제로 많이 쓰는 방식이다(Frank Luna 책의 예제가 이렇게 한다: 리스트를 연 채로 두고, 초기화 코드가 기록한 뒤 Close → Execute → Flush). <code>GraphicsDevice.cpp:76</code>의 <code>Close()</code>만 지우면 <code>BeginUpload</code>가 하던 "열기"는 필요 없어진다.</p>
+<p>게다가 닫기 쪽도 지금 있는 public 함수로 할 수 있다. <code>CommandList()</code>, <code>CommandQueue()</code> getter(<code>GraphicsDevice.h:35-36</code>)와 <code>WaitForGpu()</code>(<code>GraphicsDevice.h:21</code>)가 이미 공개되어 있기 때문이다.</p>
+<div class="codeblock"><div class="cb-head"><span>Close를 지운 경우의 main</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">gfx.Init(hwnd);                                    // 리스트가 열린 채로 끝남
+
+ID3D12GraphicsCommandList* list = gfx.CommandList();
+cube.Init(gfx.Device(), list);                     // 기록
+list-&gt;Close();
+ID3D12CommandList* lists[] = { list };
+gfx.CommandQueue()-&gt;ExecuteCommandLists(1, lists);
+gfx.WaitForGpu();                                  // 복사 완료
+cube.ReleaseUploadBuffers();</code></pre></div>
+<p>할당자도 문제없다. 리스트는 <code>m_frameContexts[0]</code>의 할당자로 만들어졌고(<code>GraphicsDevice.cpp:74-75</code>), <code>WaitForGpu</code>로 GPU가 끝난 뒤이므로 첫 <code>BeginFrame</code>이 그 할당자를 Reset해도 안전하다.</p>
+
+<h4>대신 생기는 약속</h4>
+<p>단점은 기능이 아니라 <strong>"누군가 반드시 닫아야 한다"는 숨은 약속</strong>이 생긴다는 점이다.</p>
+<ul>
+	<li><code>gfx.Init</code>이 끝난 뒤 리스트가 열려 있으므로, 첫 <code>BeginFrame</code> 전에 <strong>반드시</strong> 누군가 Close + Execute를 해야 한다. 아무도 안 하면 <code>BeginFrame</code>의 <code>m_commandList->Reset</code>(<code>GraphicsDevice.cpp:267</code>)이 "닫히지 않은 리스트를 Reset" 에러를 낸다. 업로드할 게 없는 프로그램에서도 닫는 코드는 있어야 한다.</li>
+	<li>Close / Execute / Wait를 main이 직접 하므로 <code>GraphicsDevice</code>의 프레임 관리 규칙(언제 열리고 닫히는지)이 클래스 밖으로 새어 나온다.</li>
+	<li><strong>시작할 때 한 번</strong>만 통한다. 나중에 게임 도중 메시를 새로 불러오려면 결국 프레임 밖에서 리스트를 다시 여는 함수가 필요하다.</li>
+</ul>
+
+<div class="table-wrap"><table>
+	<tr><th></th><th>Init에서 Close 안 함</th><th>BeginUpload / EndUpload</th></tr>
+	<tr><td>추가 코드</td><td>거의 없음 (한 줄 삭제)</td><td>함수 2개</td></tr>
+	<tr><td>열림/닫힘 짝</td><td>Init(열기)과 main(닫기)에 흩어짐</td><td>한 쌍으로 보임</td></tr>
+	<tr><td>깜빡하면</td><td>첫 <code>BeginFrame</code>에서 에러</td><td>짝이 눈에 보여서 덜 깜빡함</td></tr>
+	<tr><td>게임 도중 다시 업로드</td><td>불가 (다른 함수 필요)</td><td>가능</td></tr>
+</table></div>
+
+<div class="callout key">
+	<span class="label">결론</span>
+	둘 다 맞는 방법이다. 지금처럼 시작할 때 큐브 하나만 올린다면 Close를 지우는 쪽이 제일 짧다. "열기 → 기록 → 닫기 + 실행 + 대기"라는 짝을 함수로 보이게 하고 나중에도 쓰려면 <code>BeginUpload</code> / <code>EndUpload</code>가 낫다. 어느 쪽이든 2~4번(DEFAULT 버퍼, 배리어, 펜스 대기 후 임시 버퍼 해제)은 똑같다.
+</div>
 </section>
 
 <!--CHAPTERS-END: 새 장(section)은 이 줄 바로 위에 추가 (형식은 tools/build_note.py 참고)-->
