@@ -849,6 +849,37 @@ else
 }</code></pre></div>
 <p>둘 다 맞다. 하나는 "생성 직후 닫아서 상태를 통일하고 여는 코드는 한 곳", 다른 하나는 "불필요한 왕복 없이 처음과 나중을 나눔"이다. 많은 예제가 앞의 방식을 쓰는 건 <code>GraphicsDevice</code>처럼 리스트를 Init에서 미리 만들어 두고 실제로 여는 건 나중(<code>BeginFrame</code>)에 하는 경우가 흔하기 때문이다.</p>
 
+<h4>Close와 Reset은 각각 무슨 뜻인가</h4>
+<p class="qa">close와 reset이 각기 무슨 의미인데?</p>
+<p>비유로 시작하면: <strong>할당자는 공책</strong>(명령이 실제로 적히는 메모리), <strong>커맨드 리스트는 펜</strong>(적는 도구 + 지금 무엇을 바인딩했는지 같은 기록 상태), <strong>큐는 우체통</strong>이다.</p>
+<div class="table-wrap"><table>
+	<tr><th>호출</th><th>의미</th><th>호출 조건</th><th>하지 않는 것</th></tr>
+	<tr><td><code>list-&gt;Close()</code></td><td><strong>기록 끝.</strong> 지금까지 적은 명령을 GPU가 실행할 수 있는 형태로 마무리한다. 이후 리스트는 "실행 가능" 상태가 되고 더 적을 수 없다</td><td>열려 있을 때</td><td>GPU에 보내지 않는다 (그건 <code>ExecuteCommandLists</code>)</td></tr>
+	<tr><td><code>list-&gt;Reset(alloc, pso)</code></td><td><strong>새 기록 시작.</strong> 리스트를 <code>alloc</code>(공책)에 연결하고, 기록 상태(바인딩한 PSO, 루트 시그니처, 렌더 타깃, 뷰포트 등)를 초기값으로 돌린다. 두 번째 인자는 처음부터 걸어 둘 PSO (<code>nullptr</code> = 없음)</td><td>닫혀 있을 때. GPU가 이전 내용을 아직 실행 중이어도 된다</td><td>이전에 적은 명령을 지우지 않는다 (명령은 할당자에 있음)</td></tr>
+	<tr><td><code>alloc-&gt;Reset()</code></td><td><strong>공책 지우기.</strong> 이 할당자에 적힌 모든 명령의 메모리를 재사용 가능하게 비운다</td><td>GPU가 그 명령을 다 실행했고, 이 할당자로 기록 중인 리스트가 없을 때</td><td>리스트 상태는 건드리지 않는다</td></tr>
+</table></div>
+
+<p>리스트는 두 상태만 오간다.</p>
+<div class="codeblock"><div class="cb-head"><span>커맨드 리스트 상태</span><button class="copy" type="button">복사</button></div><pre><code class="language-plaintext">            Reset(할당자, PSO)
+   ┌──────────────────────────────────┐
+   │                                  ▼
+[닫힘: 실행 가능]                 [열림: 기록 중]
+   ▲   │                              │  ResourceBarrier, CopyBufferRegion,
+   │   │ ExecuteCommandLists          │  SetPipelineState, Draw ... 기록
+   │   ▼ (큐가 실행, 상태는 그대로 닫힘)  │
+   └──────────────────────────────────┘
+                 Close()</code></pre></div>
+<ul>
+	<li><code>CreateCommandList</code>는 리스트를 <strong>열림</strong>으로 만든다(생성 = 암묵적인 첫 Reset).</li>
+	<li>Execute는 상태를 바꾸지 않는다. 닫힌 리스트는 여러 번 Execute할 수도 있다(같은 명령을 다시 실행).</li>
+	<li>Close는 "기록 중 잘못된 호출이 있었는지"를 알려 주는 지점이기도 하다. 기록 중 실수가 있으면 Close가 실패 HRESULT를 돌려준다.</li>
+</ul>
+
+<div class="callout">
+	<span class="label">Reset이 기록 상태를 초기화한다는 것의 결과</span>
+	매 프레임 <code>BeginFrame</code>이 렌더 타깃, 뷰포트, 시저를 다시 설정하고(<code>GraphicsDevice.cpp:274-278</code>), main이 루트 시그니처와 PSO, 토폴로지를 다시 거는(<code>main.cpp:199-203</code>) 이유가 이것이다. 리스트를 Reset하면 지난 프레임에 걸어 둔 바인딩이 남아 있지 않다. DX11처럼 "한 번 설정하면 계속 유지"되는 상태가 없다.
+</div>
+
 <h4>각 호출은 어느 객체의 메서드인가</h4>
 <p class="qa">이거 각기 어떤 객체에서 호출된건지 알려줘 (위 표: 호출 / 리스트 상태)</p>
 <p>등장하는 D3D12 객체는 <strong>디바이스, 할당자, 커맨드 리스트, 큐, 펜스, 리소스</strong> 여섯 종류다. 줄 번호는 <code>Uploader.cpp</code> 기준이다.</p>
