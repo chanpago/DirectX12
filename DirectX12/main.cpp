@@ -12,6 +12,7 @@
 #include "BasicPipeline.h"
 #include "Camera.h"
 #include "InstanceBuffer.h"
+#include "Uploader.h"
 
 using namespace DirectX;
 
@@ -135,6 +136,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 	BasicPipeline  basicPipeline;
 	Camera         camera;
 	InstanceBuffer instanceBuffer;
+	Uploader       uploader;
 
 	float cubeAngle = 0.0f; // 라디안
 	InstanceData instances[kNumInstances];
@@ -143,7 +145,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 	try
 	{
 		gfx.Init(hwnd);
-		cube.Init(gfx.Device());
+
+		// 정적 메시 업로드: 복사 명령을 모아서 기록 → End에서 제출 + 완료 대기 + 임시 버퍼 해제
+		// 메시가 늘어나면 Begin과 End 사이에 Init만 추가
+		uploader.Begin(gfx);
+		cube.Init(uploader);
+		uploader.End();
+
 		instanceBuffer.Init(gfx.Device(), GraphicsDevice::kNumFramesInFlight, kNumInstances);
 		rootSignature.Init(gfx.Device());
 
@@ -215,6 +223,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 	rootSignature.Shutdown();
 	instanceBuffer.Shutdown();
 	cube.Shutdown();
+	uploader.Shutdown();
 	gfx.Shutdown();
 	DestroyAppWindow(hwnd, hInstance);
 

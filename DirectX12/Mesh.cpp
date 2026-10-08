@@ -1,7 +1,7 @@
 ﻿#include "Mesh.h"
+#include "Uploader.h"
 
 #include <cstdint>
-#include <cstring>
 
 // ---------------------------------------------------------------------------
 // 큐브 데이터 (로컬 좌표계: 원점 중심, 한 변 1, 왼손 / Y-up / +Z 앞쪽)
@@ -33,65 +33,22 @@ static const uint16_t kCubeIndices[] =
 static_assert(_countof(kCubeIndices) == 36, "큐브 인덱스는 6면 x 2삼각형 x 3 = 36개");
 
 // ---------------------------------------------------------------------------
-// 버퍼 생성
-// ---------------------------------------------------------------------------
-// data를 size 바이트만큼 담은 UPLOAD 힙 버퍼를 만들어 반환
-static ComPtr<ID3D12Resource> CreateUploadBuffer(ID3D12Device* device, const void* data, UINT64 size)
-{
-	// 1. 힙 속성: CPU가 쓸 수 있는 UPLOAD 힙
-	D3D12_HEAP_PROPERTIES heapProps = {};
-	heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
-
-	// 2. 리소스 설명: size 바이트짜리 1차원 버퍼
-	D3D12_RESOURCE_DESC desc = {};
-	desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-	desc.Width = size;
-	desc.Height = 1;
-	desc.DepthOrArraySize = 1;
-	desc.MipLevels = 1;
-	desc.Format = DXGI_FORMAT_UNKNOWN;
-	desc.SampleDesc.Count = 1;
-	desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-	desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-	// 3. 생성: UPLOAD 힙은 GENERIC_READ 상태로 시작해야 함, clear value 없음
-	ComPtr<ID3D12Resource> buffer;
-	ThrowIfFailed(device->CreateCommittedResource(
-		&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
-		D3D12_RESOURCE_STATE_GENERIC_READ,
-		nullptr,
-		IID_PPV_ARGS(&buffer)), "CreateCommittedResource(Upload)");
-
-	// 4. Map: GPU 메모리를 CPU 포인터로 얻음. readRange {0, 0} = CPU는 읽지 않음
-	void* mapped = nullptr;
-	D3D12_RANGE readRange = { 0, 0 };
-	ThrowIfFailed(buffer->Map(0, &readRange, &mapped), "Map");
-
-	// 5. 복사
-	memcpy(mapped, data, static_cast<size_t>(size));
-
-	// 6. Unmap: nullptr = 전체 범위에 썼다
-	buffer->Unmap(0, nullptr);
-
-	// 7. 반환 (ComPtr이 소유권을 호출한 쪽으로 넘김)
-	return buffer;
-}
-
-// ---------------------------------------------------------------------------
 // Mesh
 // ---------------------------------------------------------------------------
-void Mesh::Init(ID3D12Device* device)
+void Mesh::Init(Uploader& uploader)
 {
-	// 1. 버텍스 버퍼: GPU 메모리 할당 + 정점 데이터 복사
-	m_vertexBuffer = CreateUploadBuffer(device, kCubeVertices, sizeof(kCubeVertices));
+	// 1. 버텍스 버퍼: DEFAULT 힙에 할당 + 정점 데이터 복사 명령 기록 (복사 후 VB로 읽는 상태)
+	m_vertexBuffer = uploader.CreateDefaultBuffer(kCubeVertices, sizeof(kCubeVertices),
+		D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
 
 	// 2. 버텍스 버퍼 뷰: 어디서, 얼마나, 몇 바이트씩 끊어 읽을지
 	m_vertexBufferView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
 	m_vertexBufferView.SizeInBytes = static_cast<UINT>(sizeof(kCubeVertices));
 	m_vertexBufferView.StrideInBytes = sizeof(Vertex);
 
-	// 3. 인덱스 버퍼: GPU 메모리 할당 + 인덱스 데이터 복사
-	m_indexBuffer = CreateUploadBuffer(device, kCubeIndices, sizeof(kCubeIndices));
+	// 3. 인덱스 버퍼: DEFAULT 힙에 할당 + 인덱스 데이터 복사 명령 기록 (복사 후 IB로 읽는 상태)
+	m_indexBuffer = uploader.CreateDefaultBuffer(kCubeIndices, sizeof(kCubeIndices),
+		D3D12_RESOURCE_STATE_INDEX_BUFFER);
 
 	// 4. 인덱스 버퍼 뷰: 어디서, 얼마나, 인덱스 하나가 몇 비트인지
 	m_indexBufferView.BufferLocation = m_indexBuffer->GetGPUVirtualAddress();

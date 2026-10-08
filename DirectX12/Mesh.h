@@ -15,12 +15,14 @@ struct Vertex
 };
 static_assert(sizeof(Vertex) == 28, "Vertex 크기가 입력 레이아웃과 다름");
 
-// 큐브 하나의 버텍스 / 인덱스 버퍼 (UPLOAD 힙)와 뷰를 소유
+class Uploader;
+
+// 큐브 하나의 버텍스 / 인덱스 버퍼 (DEFAULT 힙)와 뷰를 소유
 class Mesh
 {
 public:
-	// 큐브 버퍼 생성
-	void Init(ID3D12Device* device);
+	// 큐브 버퍼 생성. 복사 명령은 uploader에 기록만 되고, uploader.End() 이후에 데이터가 채워짐
+	void Init(Uploader& uploader);
 
 	// 리소스 해제
 	void Shutdown();
@@ -31,8 +33,8 @@ public:
 	UINT IndexCount() const;
 
 private:
-	ComPtr<ID3D12Resource>   m_vertexBuffer;      // 정점 데이터가 담긴 GPU 메모리
-	ComPtr<ID3D12Resource>   m_indexBuffer;       // 인덱스 데이터가 담긴 GPU 메모리
+	ComPtr<ID3D12Resource>   m_vertexBuffer;      // 정점 데이터가 담긴 GPU 메모리 (DEFAULT 힙)
+	ComPtr<ID3D12Resource>   m_indexBuffer;       // 인덱스 데이터가 담긴 GPU 메모리 (DEFAULT 힙)
 	D3D12_VERTEX_BUFFER_VIEW m_vertexBufferView = {};
 	D3D12_INDEX_BUFFER_VIEW  m_indexBufferView = {};
 	UINT                     m_indexCount = 0;

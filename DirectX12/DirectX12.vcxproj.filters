@@ -18,6 +18,7 @@
     <ClCompile Include="BasicPipeline.cpp" />
     <ClCompile Include="Camera.cpp" />
     <ClCompile Include="InstanceBuffer.cpp" />
+    <ClCompile Include="Uploader.cpp" />
     <ClCompile Include="imgui\imgui.cpp">
       <Filter>imgui</Filter>
     </ClCompile>
@@ -50,6 +51,7 @@
     <ClInclude Include="BasicPipeline.h" />
     <ClInclude Include="Camera.h" />
     <ClInclude Include="InstanceBuffer.h" />
+    <ClInclude Include="Uploader.h" />
     <ClInclude Include="imgui\imconfig.h">
       <Filter>imgui</Filter>
     </ClInclude>
