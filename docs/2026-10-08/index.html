@@ -24,6 +24,7 @@
 	<div class="date">2026-10-08</div>
 	<ol>
 		<li><a href="#plan">1. DEFAULT 힙 업로드: 무엇을 어디에 짜나</a></li>
+		<li><a href="#impl">2. 구현: Uploader 클래스와 바뀐 코드</a></li>
 	</ol>
 </nav>
 
@@ -419,6 +420,392 @@ uploader.End(...);                     // 제출·대기·임시 버퍼 해제 �
 	<tr><td>나중에 바꿀 때</td><td>모든 메시 코드를 고침</td><td>Uploader 안만 고침 (staging 링 버퍼, 복사 큐, 텍스처 업로드)</td></tr>
 </table></div>
 <p>10-07 노트 15장의 staging 링 버퍼나 복사 전용 큐로 발전할 때도, 바뀌는 곳이 <code>Uploader</code> 안으로 한정된다. 처음에는 위처럼 "임시 버퍼마다 <code>CreateCommittedResource</code> + 목록에 보관 + <code>End</code>에서 대기 후 비우기"로 단순하게 시작하면 된다.</p>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="impl">
+<h2><span class="num">2</span>구현: Uploader 클래스와 바뀐 코드</h2>
+
+<p class="qa">코드는 너가 작성하고 diff 보여줘봐 자세하게</p>
+
+<p>1장에서 정리한 설계(업로드 전담 클래스)대로 구현했다. 바뀐 파일은 다음과 같다.</p>
+<div class="table-wrap"><table>
+	<tr><th>파일</th><th>변경</th></tr>
+	<tr><td><code>Uploader.h</code> / <code>Uploader.cpp</code></td><td><strong>새 파일</strong>. 업로드 전용 할당자 + 리스트, <code>CreateDefaultBuffer</code>, 임시 버퍼 보관, <code>End</code>에서 제출·대기·해제</td></tr>
+	<tr><td><code>Mesh.h</code> / <code>Mesh.cpp</code></td><td><code>Init(Uploader&amp;)</code>로 변경. <code>CreateUploadBuffer</code>는 <code>Uploader.cpp</code>로 옮겨짐</td></tr>
+	<tr><td><code>main.cpp</code></td><td><code>uploader.Begin → cube.Init → uploader.End</code>, 종료 시 <code>Shutdown</code></td></tr>
+	<tr><td><code>DirectX12.vcxproj</code>, <code>.filters</code></td><td>새 파일 등록</td></tr>
+	<tr><td><code>GraphicsDevice</code></td><td><strong>변경 없음</strong></td></tr>
+</table></div>
+
+<h3>설계에서 바꾼 한 가지: 업로드 전용 커맨드 리스트</h3>
+<p>1장에서는 <code>GraphicsDevice.cpp:76</code>의 Close를 지우고 프레임용 리스트를 빌려 쓰는 방법을 이야기했다. 구현할 때는 <strong><code>Uploader</code>가 자기 할당자와 리스트를 따로 갖게</strong> 했다.</p>
+<ul>
+	<li><code>GraphicsDevice</code>를 고칠 필요가 없고, "루프 전에 누가 꼭 닫아야 한다"는 숨은 약속이 사라진다. 열기(<code>Begin</code>)와 닫기(<code>End</code>)가 같은 클래스 안에서 짝을 이룬다.</li>
+	<li>할당자를 프레임용과 공유하지 않으므로, 1장에서 따진 "첫 <code>BeginFrame</code>의 할당자 Reset(266줄) 전에 끝내야 한다" 같은 조건도 없다.</li>
+	<li>나중에 게임 도중 다시 업로드할 때도 <code>Begin</code> / <code>End</code>를 그대로 쓸 수 있다.</li>
+	<li>대가는 할당자와 리스트가 하나씩 더 생기는 것뿐이다. 제출은 같은 큐(<code>gfx.CommandQueue()</code>)에 하고, 대기는 기존 <code>gfx.WaitForGpu()</code>를 쓴다.</li>
+</ul>
+
+<h3>Uploader.h</h3>
+<details class="file"><summary>DirectX12/Uploader.h (43줄)</summary><div class="codeblock"><div class="cb-head"><span>DirectX12/Uploader.h</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">#pragma once
+
+#include &quot;D3DUtil.h&quot;
+
+#include &lt;vector&gt;
+
+class GraphicsDevice;
+
+// 정적 데이터(메시 VB/IB 등)를 DEFAULT 힙 버퍼로 올리는 클래스
+// - CPU는 DEFAULT 힙에 직접 쓸 수 없으므로: 임시 UPLOAD 버퍼에 쓰기 → GPU가 CopyBufferRegion으로 복사
+// - 복사 명령은 이 클래스의 커맨드 리스트에 모아서 기록하고, End에서 한 번에 제출 + 완료 대기
+// - 임시 UPLOAD 버퍼는 GPU 복사가 끝날 때까지 살아 있어야 하므로 End까지 여기서 보관
+//
+// 사용법:
+//   uploader.Begin(gfx);
+//   cube.Init(uploader);   // 안에서 CreateDefaultBuffer 호출 (기록만)
+//   uploader.End();        // 제출 → 대기 → 임시 버퍼 해제
+class Uploader
+{
+public:
+	// 업로드 시작: 업로드 전용 커맨드 리스트를 열어 기록할 준비
+	void Begin(GraphicsDevice&amp; gfx);
+
+	// size 바이트짜리 DEFAULT 힙 버퍼를 만들고, data를 복사하는 명령을 기록
+	// - 반환 시점에는 아직 복사되지 않음 (End 이후에 완료)
+	// - finalState: 복사 후 버퍼를 둘 상태 (VB: VERTEX_AND_CONSTANT_BUFFER, IB: INDEX_BUFFER)
+	ComPtr&lt;ID3D12Resource&gt; CreateDefaultBuffer(const void* data, UINT64 size, D3D12_RESOURCE_STATES finalState);
+
+	// 기록 종료: Close → 제출 → GPU 완료 대기 → 임시 UPLOAD 버퍼 해제
+	void End();
+
+	// 리소스 해제
+	void Shutdown();
+
+private:
+	GraphicsDevice*                     m_gfx = nullptr;
+	// GraphicsDevice의 프레임용 리스트와 따로 둠
+	// → 프레임 루프와 상관없이 언제든 열고 닫을 수 있고, gfx.Init의 Close를 건드리지 않아도 됨
+	ComPtr&lt;ID3D12CommandAllocator&gt;      m_commandAllocator;
+	ComPtr&lt;ID3D12GraphicsCommandList&gt;   m_commandList;
+	// End에서 GPU 복사가 끝날 때까지 살려 둘 임시 UPLOAD 버퍼들
+	std::vector&lt;ComPtr&lt;ID3D12Resource&gt;&gt; m_pendingUploads;
+};</code></pre></div></details>
+
+<h3>Uploader.cpp</h3>
+<details class="file"><summary>DirectX12/Uploader.cpp (120줄)</summary><div class="codeblock"><div class="cb-head"><span>DirectX12/Uploader.cpp</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">#include &quot;Uploader.h&quot;
+#include &quot;GraphicsDevice.h&quot;
+
+#include &lt;cstring&gt;
+
+// ---------------------------------------------------------------------------
+// 버퍼 생성 헬퍼
+// ---------------------------------------------------------------------------
+// size 바이트짜리 1차원 버퍼 리소스를 heapType 힙에 initialState 상태로 만든다
+static ComPtr&lt;ID3D12Resource&gt; CreateBuffer(ID3D12Device* device, D3D12_HEAP_TYPE heapType, UINT64 size,
+	D3D12_RESOURCE_STATES initialState, const char* what)
+{
+	D3D12_HEAP_PROPERTIES heapProps = {};
+	heapProps.Type = heapType;
+
+	D3D12_RESOURCE_DESC desc = {};
+	desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	desc.Width = size;
+	desc.Height = 1;
+	desc.DepthOrArraySize = 1;
+	desc.MipLevels = 1;
+	desc.Format = DXGI_FORMAT_UNKNOWN;
+	desc.SampleDesc.Count = 1;
+	desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+	desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+	ComPtr&lt;ID3D12Resource&gt; buffer;
+	ThrowIfFailed(device-&gt;CreateCommittedResource(
+		&amp;heapProps, D3D12_HEAP_FLAG_NONE, &amp;desc,
+		initialState,
+		nullptr,
+		IID_PPV_ARGS(&amp;buffer)), what);
+	return buffer;
+}
+
+// ---------------------------------------------------------------------------
+// Uploader
+// ---------------------------------------------------------------------------
+void Uploader::Begin(GraphicsDevice&amp; gfx)
+{
+	m_gfx = &amp;gfx;
+	ID3D12Device* device = gfx.Device();
+
+	// 처음 한 번만 만듦. 리스트는 열린 상태로 만들어지므로 바로 닫아 두고, 아래에서 Reset으로 연다
+	if (!m_commandAllocator)
+	{
+		ThrowIfFailed(device-&gt;CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+			IID_PPV_ARGS(&amp;m_commandAllocator)), &quot;CreateCommandAllocator(Upload)&quot;);
+		ThrowIfFailed(device-&gt;CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+			m_commandAllocator.Get(), nullptr, IID_PPV_ARGS(&amp;m_commandList)), &quot;CreateCommandList(Upload)&quot;);
+		ThrowIfFailed(m_commandList-&gt;Close(), &quot;CommandList::Close(Upload)&quot;);
+	}
+
+	// 기록 시작. 이전 End에서 GPU 완료까지 기다렸으므로 할당자를 Reset해도 안전
+	ThrowIfFailed(m_commandAllocator-&gt;Reset(), &quot;CommandAllocator::Reset(Upload)&quot;);
+	ThrowIfFailed(m_commandList-&gt;Reset(m_commandAllocator.Get(), nullptr), &quot;CommandList::Reset(Upload)&quot;);
+}
+
+ComPtr&lt;ID3D12Resource&gt; Uploader::CreateDefaultBuffer(const void* data, UINT64 size, D3D12_RESOURCE_STATES finalState)
+{
+	ID3D12Device* device = m_gfx-&gt;Device();
+
+	// 1. 진짜 버퍼: DEFAULT 힙 (VRAM). CPU는 Map할 수 없음
+	//    버퍼는 초기 상태를 무엇으로 넘겨도 COMMON으로 만들어지므로 COMMON으로 만들고 배리어로 바꾼다
+	ComPtr&lt;ID3D12Resource&gt; defaultBuffer = CreateBuffer(device, D3D12_HEAP_TYPE_DEFAULT, size,
+		D3D12_RESOURCE_STATE_COMMON, &quot;CreateCommittedResource(Default)&quot;);
+
+	// 2. 임시 버퍼: UPLOAD 힙. CPU가 Map해서 데이터를 써 둔다
+	ComPtr&lt;ID3D12Resource&gt; uploadBuffer = CreateBuffer(device, D3D12_HEAP_TYPE_UPLOAD, size,
+		D3D12_RESOURCE_STATE_GENERIC_READ, &quot;CreateCommittedResource(Upload)&quot;);
+
+	void* mapped = nullptr;
+	D3D12_RANGE readRange = { 0, 0 }; // CPU는 읽지 않음
+	ThrowIfFailed(uploadBuffer-&gt;Map(0, &amp;readRange, &amp;mapped), &quot;Map(Upload)&quot;);
+	memcpy(mapped, data, static_cast&lt;size_t&gt;(size));
+	uploadBuffer-&gt;Unmap(0, nullptr);
+
+	// 3. 복사 명령 기록 (여기서는 기록만. 실제 복사는 End에서 제출한 뒤 GPU가 실행)
+	//    COMMON → COPY_DEST: 복사 대상으로 쓰겠다고 알림
+	D3D12_RESOURCE_BARRIER toCopyDest = TransitionBarrier(defaultBuffer.Get(),
+		D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+	m_commandList-&gt;ResourceBarrier(1, &amp;toCopyDest);
+
+	//    UPLOAD 버퍼의 0번 바이트부터 size 바이트를 DEFAULT 버퍼의 0번 바이트로
+	m_commandList-&gt;CopyBufferRegion(defaultBuffer.Get(), 0, uploadBuffer.Get(), 0, size);
+
+	//    COPY_DEST → finalState: 복사가 끝나야 VB/IB로 읽을 수 있음 (GPU 안의 순서는 배리어가 보장)
+	D3D12_RESOURCE_BARRIER toFinal = TransitionBarrier(defaultBuffer.Get(),
+		D3D12_RESOURCE_STATE_COPY_DEST, finalState);
+	m_commandList-&gt;ResourceBarrier(1, &amp;toFinal);
+
+	// 4. 임시 버퍼는 GPU가 복사를 끝낼 때까지 살아 있어야 하므로 End까지 보관
+	m_pendingUploads.push_back(uploadBuffer);
+
+	return defaultBuffer;
+}
+
+void Uploader::End()
+{
+	// 1. 기록 끝
+	ThrowIfFailed(m_commandList-&gt;Close(), &quot;CommandList::Close(Upload)&quot;);
+
+	// 2. GPU에 제출 (바로 반환됨. GPU는 이후에 실행)
+	ID3D12CommandList* lists[] = { m_commandList.Get() };
+	m_gfx-&gt;CommandQueue()-&gt;ExecuteCommandLists(1, lists);
+
+	// 3. 복사가 끝날 때까지 CPU 대기 (큐에 Signal → 펜스 값 도달까지 기다림)
+	m_gfx-&gt;WaitForGpu();
+
+	// 4. 이제 GPU가 임시 버퍼를 다 읽었으므로 해제해도 안전
+	m_pendingUploads.clear();
+}
+
+void Uploader::Shutdown()
+{
+	m_pendingUploads.clear();
+	m_commandList.Reset();
+	m_commandAllocator.Reset();
+	m_gfx = nullptr;
+}</code></pre></div></details>
+<p>읽는 순서:</p>
+<ol>
+	<li><code>CreateBuffer</code>: 예전 <code>Mesh.cpp</code>의 <code>CreateUploadBuffer</code>에서 리소스 생성 부분만 떼어 힙 종류와 초기 상태를 인자로 받게 했다. UPLOAD와 DEFAULT 둘 다 이걸로 만든다.</li>
+	<li><code>Begin</code>: 처음 한 번 할당자와 리스트를 만들고(만들자마자 Close), 매번 할당자 Reset → 리스트 Reset으로 기록을 시작한다. 할당자 Reset이 안전한 이유는 이전 <code>End</code>가 GPU 완료까지 기다렸기 때문이다.</li>
+	<li><code>CreateDefaultBuffer</code>: DEFAULT 버퍼(COMMON) 생성 → UPLOAD 임시 버퍼 생성 + memcpy → 배리어 COMMON→COPY_DEST → <code>CopyBufferRegion</code> → 배리어 COPY_DEST→finalState → 임시 버퍼를 <code>m_pendingUploads</code>에 보관. 반환할 때는 아직 복사 전이다.</li>
+	<li><code>End</code>: Close → Execute → <code>WaitForGpu</code> → <code>m_pendingUploads.clear()</code>. 1장 마지막 소제목에서 본 세 단계 + 해제 그대로다.</li>
+</ol>
+
+<h3>Mesh 변경</h3>
+<div class="codeblock"><div class="cb-head"><span>git diff HEAD -- DirectX12/Mesh.h</span><button class="copy" type="button">복사</button></div><pre><code class="language-diff">diff --git a/DirectX12/Mesh.h b/DirectX12/Mesh.h
+index 03ff93e..1ee4c17 100644
+--- a/DirectX12/Mesh.h
++++ b/DirectX12/Mesh.h
+@@ -15,12 +15,14 @@ struct Vertex
+ };
+ static_assert(sizeof(Vertex) == 28, &quot;Vertex 크기가 입력 레이아웃과 다름&quot;);
+ 
+-// 큐브 하나의 버텍스 / 인덱스 버퍼 (UPLOAD 힙)와 뷰를 소유
++class Uploader;
++
++// 큐브 하나의 버텍스 / 인덱스 버퍼 (DEFAULT 힙)와 뷰를 소유
+ class Mesh
+ {
+ public:
+-	// 큐브 버퍼 생성
+-	void Init(ID3D12Device* device);
++	// 큐브 버퍼 생성. 복사 명령은 uploader에 기록만 되고, uploader.End() 이후에 데이터가 채워짐
++	void Init(Uploader&amp; uploader);
+ 
+ 	// 리소스 해제
+ 	void Shutdown();
+@@ -31,8 +33,8 @@ public:
+ 	UINT IndexCount() const;
+ 
+ private:
+-	ComPtr&lt;ID3D12Resource&gt;   m_vertexBuffer;      // 정점 데이터가 담긴 GPU 메모리
+-	ComPtr&lt;ID3D12Resource&gt;   m_indexBuffer;       // 인덱스 데이터가 담긴 GPU 메모리
++	ComPtr&lt;ID3D12Resource&gt;   m_vertexBuffer;      // 정점 데이터가 담긴 GPU 메모리 (DEFAULT 힙)
++	ComPtr&lt;ID3D12Resource&gt;   m_indexBuffer;       // 인덱스 데이터가 담긴 GPU 메모리 (DEFAULT 힙)
+ 	D3D12_VERTEX_BUFFER_VIEW m_vertexBufferView = {};
+ 	D3D12_INDEX_BUFFER_VIEW  m_indexBufferView = {};
+ 	UINT                     m_indexCount = 0;</code></pre></div>
+<div class="codeblock"><div class="cb-head"><span>git diff HEAD -- DirectX12/Mesh.cpp</span><button class="copy" type="button">복사</button></div><pre><code class="language-diff">diff --git a/DirectX12/Mesh.cpp b/DirectX12/Mesh.cpp
+index 818ff31..b016a15 100644
+--- a/DirectX12/Mesh.cpp
++++ b/DirectX12/Mesh.cpp
+@@ -1,7 +1,7 @@
+ #include &quot;Mesh.h&quot;
++#include &quot;Uploader.h&quot;
+ 
+ #include &lt;cstdint&gt;
+-#include &lt;cstring&gt;
+ 
+ // ---------------------------------------------------------------------------
+ // 큐브 데이터 (로컬 좌표계: 원점 중심, 한 변 1, 왼손 / Y-up / +Z 앞쪽)
+@@ -32,66 +32,23 @@ static const uint16_t kCubeIndices[] =
+ };
+ static_assert(_countof(kCubeIndices) == 36, &quot;큐브 인덱스는 6면 x 2삼각형 x 3 = 36개&quot;);
+ 
+-// ---------------------------------------------------------------------------
+-// 버퍼 생성
+-// ---------------------------------------------------------------------------
+-// data를 size 바이트만큼 담은 UPLOAD 힙 버퍼를 만들어 반환
+-static ComPtr&lt;ID3D12Resource&gt; CreateUploadBuffer(ID3D12Device* device, const void* data, UINT64 size)
+-{
+-	// 1. 힙 속성: CPU가 쓸 수 있는 UPLOAD 힙
+-	D3D12_HEAP_PROPERTIES heapProps = {};
+-	heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+-
+-	// 2. 리소스 설명: size 바이트짜리 1차원 버퍼
+-	D3D12_RESOURCE_DESC desc = {};
+-	desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+-	desc.Width = size;
+-	desc.Height = 1;
+-	desc.DepthOrArraySize = 1;
+-	desc.MipLevels = 1;
+-	desc.Format = DXGI_FORMAT_UNKNOWN;
+-	desc.SampleDesc.Count = 1;
+-	desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+-	desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+-
+-	// 3. 생성: UPLOAD 힙은 GENERIC_READ 상태로 시작해야 함, clear value 없음
+-	ComPtr&lt;ID3D12Resource&gt; buffer;
+-	ThrowIfFailed(device-&gt;CreateCommittedResource(
+-		&amp;heapProps, D3D12_HEAP_FLAG_NONE, &amp;desc,
+-		D3D12_RESOURCE_STATE_GENERIC_READ,
+-		nullptr,
+-		IID_PPV_ARGS(&amp;buffer)), &quot;CreateCommittedResource(Upload)&quot;);
+-
+-	// 4. Map: GPU 메모리를 CPU 포인터로 얻음. readRange {0, 0} = CPU는 읽지 않음
+-	void* mapped = nullptr;
+-	D3D12_RANGE readRange = { 0, 0 };
+-	ThrowIfFailed(buffer-&gt;Map(0, &amp;readRange, &amp;mapped), &quot;Map&quot;);
+-
+-	// 5. 복사
+-	memcpy(mapped, data, static_cast&lt;size_t&gt;(size));
+-
+-	// 6. Unmap: nullptr = 전체 범위에 썼다
+-	buffer-&gt;Unmap(0, nullptr);
+-
+-	// 7. 반환 (ComPtr이 소유권을 호출한 쪽으로 넘김)
+-	return buffer;
+-}
+-
+ // ---------------------------------------------------------------------------
+ // Mesh
+ // ---------------------------------------------------------------------------
+-void Mesh::Init(ID3D12Device* device)
++void Mesh::Init(Uploader&amp; uploader)
+ {
+-	// 1. 버텍스 버퍼: GPU 메모리 할당 + 정점 데이터 복사
+-	m_vertexBuffer = CreateUploadBuffer(device, kCubeVertices, sizeof(kCubeVertices));
++	// 1. 버텍스 버퍼: DEFAULT 힙에 할당 + 정점 데이터 복사 명령 기록 (복사 후 VB로 읽는 상태)
++	m_vertexBuffer = uploader.CreateDefaultBuffer(kCubeVertices, sizeof(kCubeVertices),
++		D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+ 
+ 	// 2. 버텍스 버퍼 뷰: 어디서, 얼마나, 몇 바이트씩 끊어 읽을지
+ 	m_vertexBufferView.BufferLocation = m_vertexBuffer-&gt;GetGPUVirtualAddress();
+ 	m_vertexBufferView.SizeInBytes = static_cast&lt;UINT&gt;(sizeof(kCubeVertices));
+ 	m_vertexBufferView.StrideInBytes = sizeof(Vertex);
+ 
+-	// 3. 인덱스 버퍼: GPU 메모리 할당 + 인덱스 데이터 복사
+-	m_indexBuffer = CreateUploadBuffer(device, kCubeIndices, sizeof(kCubeIndices));
++	// 3. 인덱스 버퍼: DEFAULT 힙에 할당 + 인덱스 데이터 복사 명령 기록 (복사 후 IB로 읽는 상태)
++	m_indexBuffer = uploader.CreateDefaultBuffer(kCubeIndices, sizeof(kCubeIndices),
++		D3D12_RESOURCE_STATE_INDEX_BUFFER);
+ 
+ 	// 4. 인덱스 버퍼 뷰: 어디서, 얼마나, 인덱스 하나가 몇 비트인지
+ 	m_indexBufferView.BufferLocation = m_indexBuffer-&gt;GetGPUVirtualAddress();</code></pre></div>
+<p>Mesh는 이제 리스트, 배리어, 임시 버퍼를 전혀 모른다. "이 데이터로 DEFAULT 버퍼를 만들어 주고, 복사 후에는 이 상태로 둬 줘"라고 부탁하고 결과 버퍼만 받는다. VBV/IBV 코드는 한 줄도 안 바뀌었다. <code>GetGPUVirtualAddress()</code>가 이제 DEFAULT 버퍼의 주소를 돌려줄 뿐이다.</p>
+<p>임시 버퍼 멤버(<code>m_vertexUpload</code> 등)와 <code>ReleaseUploadBuffers()</code>도 필요 없어졌다. 그 일은 <code>Uploader</code>가 맡는다.</p>
+
+<h3>main 변경</h3>
+<div class="codeblock"><div class="cb-head"><span>git diff HEAD -- DirectX12/main.cpp</span><button class="copy" type="button">복사</button></div><pre><code class="language-diff">diff --git a/DirectX12/main.cpp b/DirectX12/main.cpp
+index 29894c5..b3088fc 100644
+--- a/DirectX12/main.cpp
++++ b/DirectX12/main.cpp
+@@ -12,6 +12,7 @@
+ #include &quot;BasicPipeline.h&quot;
+ #include &quot;Camera.h&quot;
+ #include &quot;InstanceBuffer.h&quot;
++#include &quot;Uploader.h&quot;
+ 
+ using namespace DirectX;
+ 
+@@ -135,6 +136,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
+ 	BasicPipeline  basicPipeline;
+ 	Camera         camera;
+ 	InstanceBuffer instanceBuffer;
++	Uploader       uploader;
+ 
+ 	float cubeAngle = 0.0f; // 라디안
+ 	InstanceData instances[kNumInstances];
+@@ -143,7 +145,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
+ 	try
+ 	{
+ 		gfx.Init(hwnd);
+-		cube.Init(gfx.Device());
++
++		// 정적 메시 업로드: 복사 명령을 모아서 기록 → End에서 제출 + 완료 대기 + 임시 버퍼 해제
++		// 메시가 늘어나면 Begin과 End 사이에 Init만 추가
++		uploader.Begin(gfx);
++		cube.Init(uploader);
++		uploader.End();
++
+ 		instanceBuffer.Init(gfx.Device(), GraphicsDevice::kNumFramesInFlight, kNumInstances);
+ 		rootSignature.Init(gfx.Device());
+ 
+@@ -215,6 +223,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
+ 	rootSignature.Shutdown();
+ 	instanceBuffer.Shutdown();
+ 	cube.Shutdown();
++	uploader.Shutdown();
+ 	gfx.Shutdown();
+ 	DestroyAppWindow(hwnd, hInstance);
+ </code></pre></div>
+<p><code>cube.Init</code>이 반환된 시점에는 복사 명령만 기록되어 있고, <code>uploader.End()</code>가 반환되어야 DEFAULT 버퍼에 데이터가 들어 있다. 이후 초기화(<code>instanceBuffer</code>, 루트 시그니처, PSO, ImGui)와 렌더 루프는 그대로다. 메시가 늘면 <code>Begin</code>과 <code>End</code> 사이에 <code>Init</code> 줄만 추가하면 되고, 제출과 대기는 여전히 한 번이다.</p>
+
+<h3>확인</h3>
+<figure><img src="img/default-heap.png" alt="DEFAULT 힙으로 바꾼 뒤의 실행 화면. 큐브 100개가 이전과 똑같이 그려진다"><figcaption>DEFAULT 힙으로 바꾼 뒤. 화면은 이전과 같다 (버퍼 위치만 바뀜)</figcaption></figure>
+<ul>
+	<li>Debug x64 빌드: 경고·에러 없음.</li>
+	<li>실행 후 6초 동안 살아 있음. 디버그 레이어가 에러에서 멈추도록 되어 있으므로(<code>GraphicsDevice.cpp:35-36</code>) 배리어 상태나 리소스 수명 에러가 있었다면 그 자리에서 중단됐을 것이다.</li>
+</ul>
+<div class="callout">
+	<span class="label">직접 해 볼 실험</span>
+	<ul>
+		<li><code>Uploader::End</code>에서 <code>WaitForGpu()</code>와 <code>clear()</code>의 순서를 바꿔 본다 → GPU가 읽는 중인 리소스를 해제했다는 디버그 레이어 에러.</li>
+		<li>두 번째 배리어(COPY_DEST → finalState)를 빼 본다 → Draw 때 VB가 VERTEX_AND_CONSTANT_BUFFER 상태가 아니라는 에러.</li>
+		<li><code>End()</code> 호출 자체를 빼 본다 → 에러 없이 큐브가 사라진다(복사 명령이 제출되지 않음).</li>
+	</ul>
+	VS 디버거(F5)로 실행해야 출력 창에서 메시지를 볼 수 있다.
+</div>
 </section>
 
 <!--CHAPTERS-END: 새 장(section)은 이 줄 바로 위에 추가 (형식은 tools/build_note.py 참고)-->
