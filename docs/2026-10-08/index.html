@@ -377,6 +377,48 @@ while (PumpMessages()) { ... }</code></pre></div>
 	<span class="label">결론</span>
 	둘 다 맞는 방법이다. 지금처럼 시작할 때 큐브 하나만 올린다면 Close를 지우는 쪽이 제일 짧다. "열기 → 기록 → 닫기 + 실행 + 대기"라는 짝을 함수로 보이게 하고 나중에도 쓰려면 <code>BeginUpload</code> / <code>EndUpload</code>가 낫다. 어느 쪽이든 2~4번(DEFAULT 버퍼, 배리어, 펜스 대기 후 임시 버퍼 해제)은 똑같다.
 </div>
+
+<h3>업로드 코드를 Mesh 밖으로 빼기</h3>
+<p class="qa">근데 지금 cube init에 그렇게 코드를 작성하면 추후에 메쉬가 늘어날때 문제니까 그냥 따로 빼는게 낫지않아?</p>
+<p>맞다. 다만 무엇이 문제인지 나눠 보면, <strong>"메시마다 자기 복사 명령을 기록"하는 것 자체는 메시가 늘어도 문제없다.</strong> 여러 메시가 같은 열린 리스트에 차례로 기록하고 마지막에 한 번 제출하면 된다. 메시가 늘 때 깨지는 건 (B 방식처럼) 닫기·제출·대기를 Init 안에 넣는 것이다.</p>
+<p>그래도 따로 빼는 게 나은 이유가 두 가지 더 있다.</p>
+<ul>
+	<li><strong>임시 버퍼 관리가 메시마다 반복된다.</strong> 메시마다 <code>m_vertexUpload</code> / <code>m_indexUpload</code> 멤버와 <code>ReleaseUploadBuffers()</code>를 두고, main이 메시마다 Release를 불러야 한다. 렌더링에 쓰지도 않는 임시 버퍼를 Mesh가 들고 있는 셈이다.</li>
+	<li><strong>메시 말고도 업로드할 게 생긴다.</strong> 텍스처, 정적 상수 데이터 등도 같은 "임시 버퍼 → 복사 → 배리어 → 대기" 흐름을 탄다.</li>
+</ul>
+
+<h4>제안: 업로드 전담 클래스</h4>
+<p>"리스트 열기 / 복사 기록 / 임시 버퍼 보관 / 닫기·제출·대기·해제"를 한 클래스(예: <code>Uploader</code>)가 맡는다. Mesh는 "이 데이터를 DEFAULT 버퍼로 만들어 줘"라고 부탁만 하고 결과 버퍼만 받는다.</p>
+<div class="codeblock"><div class="cb-head"><span>Uploader 인터페이스 예시 (뼈대)</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">class Uploader
+{
+public:
+    // 업로드 시작: 커맨드 리스트를 열린 상태로 받아 둠
+    void Begin(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList);
+
+    // DEFAULT 버퍼 생성 + 임시 UPLOAD 버퍼에 복사 + 배리어 + CopyBufferRegion 기록
+    // 임시 버퍼는 Uploader가 내부 목록에 보관
+    ComPtr&lt;ID3D12Resource&gt; CreateDefaultBuffer(const void* data, UINT64 size,
+                                               D3D12_RESOURCE_STATES finalState);
+
+    // Close → Execute → 대기 → 보관해 둔 임시 버퍼 전부 해제
+    void End(ID3D12CommandQueue* queue, GraphicsDevice&amp; gfx);
+
+private:
+    std::vector&lt;ComPtr&lt;ID3D12Resource&gt;&gt; m_pendingUploads;   // End까지 살려 둘 임시 버퍼들
+    // ...
+};</code></pre></div>
+<div class="codeblock"><div class="cb-head"><span>사용하는 쪽</span><button class="copy" type="button">복사</button></div><pre><code class="language-cpp">uploader.Begin(gfx.Device(), gfx.CommandList());
+cube.Init(gfx.Device(), uploader);     // 안에서 uploader.CreateDefaultBuffer(...) 두 번
+plane.Init(gfx.Device(), uploader);    // 메시가 늘어도 줄만 추가
+uploader.End(...);                     // 제출·대기·임시 버퍼 해제 한 번</code></pre></div>
+<div class="table-wrap"><table>
+	<tr><th></th><th>Mesh가 직접 (앞의 A 방식)</th><th>Uploader로 분리</th></tr>
+	<tr><td>Mesh가 아는 것</td><td>리스트, 배리어, 임시 버퍼 수명</td><td>"데이터 주고 DEFAULT 버퍼 받기"만</td></tr>
+	<tr><td>임시 버퍼</td><td>메시마다 멤버 + Release</td><td>Uploader 목록 하나, <code>End</code>에서 한꺼번에 해제</td></tr>
+	<tr><td>메시 추가</td><td>Init + Release 호출 추가</td><td>Init 한 줄 추가</td></tr>
+	<tr><td>나중에 바꿀 때</td><td>모든 메시 코드를 고침</td><td>Uploader 안만 고침 (staging 링 버퍼, 복사 큐, 텍스처 업로드)</td></tr>
+</table></div>
+<p>10-07 노트 15장의 staging 링 버퍼나 복사 전용 큐로 발전할 때도, 바뀌는 곳이 <code>Uploader</code> 안으로 한정된다. 처음에는 위처럼 "임시 버퍼마다 <code>CreateCommittedResource</code> + 목록에 보관 + <code>End</code>에서 대기 후 비우기"로 단순하게 시작하면 된다.</p>
 </section>
 
 <!--CHAPTERS-END: 새 장(section)은 이 줄 바로 위에 추가 (형식은 tools/build_note.py 참고)-->
