@@ -25,6 +25,7 @@
 	<ol>
 		<li><a href="#plan">1. DEFAULT 힙 업로드: 무엇을 어디에 짜나</a></li>
 		<li><a href="#impl">2. 구현: Uploader 클래스와 바뀐 코드</a></li>
+		<li><a href="#structure">3. 지금 main 구조는 일반적인가</a></li>
 	</ol>
 </nav>
 
@@ -921,6 +922,46 @@ else
 <div class="callout warn">
 	<span class="label"><code>.Reset()</code>과 <code>-&gt;Reset()</code>은 다르다</span>
 	<code>m_commandList-&gt;Reset(...)</code>(56줄)은 D3D12의 "리스트 다시 열기"다. <code>Shutdown</code>의 <code>m_commandList.Reset()</code>(117줄)은 화살표가 아니라 점이고, <code>ComPtr</code>의 "참조 놓기(Release)"다. 이름만 같고 전혀 다른 함수다. 할당자도 마찬가지로 <code>m_commandAllocator-&gt;Reset()</code>(55줄)은 메모리 비우기, <code>m_commandAllocator.Reset()</code>(118줄)은 객체 해제다.
+</div>
+</section>
+
+<!-- ===================================================================== -->
+<section class="chapter" id="structure">
+<h2><span class="num">3</span>지금 main 구조는 일반적인가</h2>
+
+<p class="qa">지금 이 구조가 일반적이고 기본적인 구조야? (main.cpp의 초기화 + 메인 루프 전체를 붙여서 질문)</p>
+
+<p>그렇다. <strong>DX12 입문 예제의 표준 구조</strong>와 거의 같다. Microsoft의 DirectX-Graphics-Samples(HelloTriangle 등)나 Frank Luna 책의 예제도 "초기화에서 리소스를 만들고 업로드를 기다린 뒤 → 루프에서 업데이트 → 프레임 시작 → 기록 → 제출" 순서다. 엔진에서도 뼈대는 같고, 이 단계들이 여러 클래스와 스레드로 나뉠 뿐이다.</p>
+
+<h3>단계별로 보면</h3>
+<div class="table-wrap"><table>
+	<tr><th>단계</th><th>지금 코드</th><th>일반적인가</th></tr>
+	<tr><td>디바이스 / 큐 / 스왑체인</td><td><code>gfx.Init</code></td><td>표준. 맨 먼저</td></tr>
+	<tr><td>정적 리소스 업로드</td><td><code>uploader.Begin → cube.Init → End</code> (<code>main.cpp:151</code>)</td><td>입문 예제의 표준. 시작할 때 막고 기다린다</td></tr>
+	<tr><td>루트 시그니처 / PSO</td><td>초기화에서 한 번</td><td>표준. PSO 생성은 무거워서 루프 안에서 만들지 않는다</td></tr>
+	<tr><td>메시지 처리, 최소화 시 쉬기, 리사이즈</td><td>루프 맨 앞 (<code>main.cpp:167-179</code>)</td><td>표준</td></tr>
+	<tr><td>업데이트 (입력, 카메라, 애니메이션)</td><td><code>BeginFrame</code> <strong>전</strong>에 CPU 배열로 계산 (<code>main.cpp:181-190</code>)</td><td>좋은 순서. GPU 대기 전에 CPU 일을 먼저 해 둔다</td></tr>
+	<tr><td>프레임 시작</td><td><code>gfx.BeginFrame</code>: 프레임 컨텍스트 대기 → Reset → 백버퍼 배리어 → 클리어 (<code>main.cpp:192</code>)</td><td>표준</td></tr>
+	<tr><td>프레임별 데이터 업로드</td><td><code>BeginFrame</code> <strong>후</strong> <code>instanceBuffer.Upload</code> (<code>main.cpp:196</code>)</td><td>표준. 그 프레임 번호의 버퍼를 GPU가 다 쓴 뒤에 덮어쓴다</td></tr>
+	<tr><td>바인딩 → Draw</td><td>루트 시그니처 → PSO → 루트 인자 → IA → Draw (<code>main.cpp:199-207</code>)</td><td>표준 순서</td></tr>
+	<tr><td>UI → 제출 / Present</td><td><code>imgui.Render</code> → <code>gfx.EndFrame</code></td><td>표준. UI는 씬 위에 마지막으로</td></tr>
+</table></div>
+
+<h3>실제 엔진에서 달라지는 부분</h3>
+<p>뼈대는 같고, 다음이 바뀐다. 지금 단계에서 미리 할 필요는 없고, 그 문제가 생길 때 하나씩 도입하면 된다.</p>
+<div class="table-wrap"><table>
+	<tr><th>지금</th><th>엔진에서는</th><th>필요해지는 때</th></tr>
+	<tr><td>main에 Draw 코드가 직접 있음</td><td><code>Renderer</code> 클래스가 "그릴 목록(씬)"을 받아 기록. main(게임 로직)은 D3D12를 모름</td><td>메시 / 머티리얼 종류가 늘 때</td></tr>
+	<tr><td>패스가 하나 (백버퍼에 바로)</td><td>그림자 → 불투명 → 투명 → 후처리 → UI 같은 여러 패스. 패스 사이 리소스 상태를 자동 관리하는 렌더 그래프</td><td>화면 밖 렌더 타깃을 쓰기 시작할 때</td></tr>
+	<tr><td>초기화에서 막고 업로드</td><td>복사 큐로 비동기 스트리밍, 게임 중에도 로딩</td><td>로딩이 길어지거나 월드가 커질 때 (10-07 노트 15장)</td></tr>
+	<tr><td>PSO 하나를 초기화에서 생성</td><td>PSO 수백~수천 개. 캐시(<code>ID3D12PipelineLibrary</code>)와 백그라운드 스레드 컴파일</td><td>셰이더 / 상태 조합이 늘 때</td></tr>
+	<tr><td>단일 스레드 기록</td><td>여러 스레드가 커맨드 리스트를 나눠 기록</td><td>Draw 수가 아주 많을 때</td></tr>
+	<tr><td>업데이트와 렌더가 한 루프에서 순서대로</td><td>게임 스레드와 렌더 스레드를 나눠 한 프레임씩 겹쳐 실행</td><td>CPU가 병목일 때</td></tr>
+</table></div>
+
+<div class="callout key">
+	<span class="label">정리</span>
+	지금 구조는 입문 단계의 정석이다. 특히 (1) 업데이트를 <code>BeginFrame</code> 전에, (2) 프레임별 버퍼 쓰기를 <code>BeginFrame</code> 후에 두는 순서, (3) 정적 업로드를 루프 전에 끝내는 것은 엔진에서도 그대로 유지되는 원칙이다. 다음으로 구조를 바꿀 시점은 메시가 두 종류 이상이 되어 main의 Draw 코드가 반복되기 시작할 때다.
 </div>
 </section>
 
