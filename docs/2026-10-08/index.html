@@ -801,8 +801,8 @@ index 29894c5..b3088fc 100644
 	<span class="label">직접 해 볼 실험</span>
 	<ul>
 		<li><code>Uploader::End</code>에서 <code>WaitForGpu()</code>와 <code>clear()</code>의 순서를 바꿔 본다 → GPU가 읽는 중인 리소스를 해제했다는 디버그 레이어 에러.</li>
-		<li>두 번째 배리어(COPY_DEST → finalState)를 빼 본다 → Draw 때 VB가 VERTEX_AND_CONSTANT_BUFFER 상태가 아니라는 에러.</li>
-		<li><code>End()</code> 호출 자체를 빼 본다 → 에러 없이 큐브가 사라진다(복사 명령이 제출되지 않음).</li>
+		<li>두 번째 배리어(COPY_DEST → finalState)를 빼 본다 → 버퍼가 COPY_DEST 상태로 Draw에 쓰인다. 기본 디버그 레이어는 Draw 시점의 VB/IB 상태까지는 검사하지 않을 수 있어서, <code>ID3D12Debug1::SetEnableGPUBasedValidation(TRUE)</code>(GPU-based validation)를 켜야 확실히 잡힌다.</li>
+		<li><code>End()</code> 호출 자체를 빼 본다 → 복사 명령이 제출되지 않아 DEFAULT 버퍼가 빈(0으로 채워진) 채로 남고, 큐브가 보이지 않는다.</li>
 	</ul>
 	VS 디버거(F5)로 실행해야 출력 창에서 메시지를 볼 수 있다.
 </div>
