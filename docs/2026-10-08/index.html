@@ -255,6 +255,27 @@ cube.ReleaseUploadBuffers();</code></pre></div>
 </table></div>
 <p>정리하면 <strong>Close → Execute → <code>WaitForGpu</code>를 전부 <code>GraphicsDevice.cpp:266</code> 전에</strong> 끝내야 한다. 그 사이의 <code>instanceBuffer.Init</code>, <code>rootSignature.Init</code>, PSO, ImGui 초기화는 디바이스만 쓰고 이 리스트를 건드리지 않으므로, 이 세 줄은 <code>cube.Init</code> 바로 뒤에 둬도 되고 루프 직전에 둬도 된다. 별도로 <code>ReleaseUploadBuffers()</code>는 <code>WaitForGpu</code> <strong>뒤</strong>여야 한다.</p>
 
+<h4>같은 리스트를 Close하고 다시 Reset해도 되나</h4>
+<p class="qa">같은 커맨드리스트에 close하고 reset하는건 문제 없어?</p>
+<p>문제없다. 오히려 <strong>그게 커맨드 리스트의 원래 쓰는 법</strong>이다. 지금 렌더 루프가 이미 매 프레임 그렇게 한다: <code>EndFrame</code>에서 Close(<code>GraphicsDevice.cpp:297</code>) → Execute(301) → 다음 <code>BeginFrame</code>에서 같은 <code>m_commandList</code>를 Reset(267).</p>
+<p>핵심은 <strong>리스트와 할당자의 역할이 다르다</strong>는 것이다.</p>
+<div class="table-wrap"><table>
+	<tr><th></th><th>커맨드 리스트</th><th>커맨드 할당자</th></tr>
+	<tr><td>정체</td><td>명령을 적는 "펜" (기록 인터페이스)</td><td>명령이 실제로 적히는 "종이" (메모리)</td></tr>
+	<tr><td>Reset 조건</td><td><strong>닫혀 있기만 하면</strong> 언제든. Execute 직후 GPU가 아직 실행 중이어도 됨</td><td><strong>GPU가 그 안의 명령을 다 실행한 뒤</strong>에만 (펜스 확인)</td></tr>
+	<tr><td>Reset하면</td><td>새 할당자(또는 같은 할당자)에 이어서 새로 기록 시작</td><td>종이를 비움</td></tr>
+</table></div>
+<p>리스트를 Reset해도 GPU가 읽고 있는 명령은 할당자 쪽 메모리에 그대로 있으므로 안전하다. 그래서 지금 루프는 프레임 N을 Execute한 직후, GPU가 아직 그걸 그리는 중에도 같은 리스트를 <strong>다른 할당자</strong>(프레임 N+1용)로 Reset해서 다음 프레임을 기록한다. 기다리는 건 할당자 쪽(<code>WaitForNextFrameContext</code>)뿐이다.</p>
+<div class="callout warn">
+	<span class="label">지켜야 할 것</span>
+	<ul>
+		<li>Reset은 <strong>닫힌</strong> 리스트에만 (열린 리스트를 Reset하면 에러).</li>
+		<li>할당자 하나에는 <strong>동시에 하나의 리스트만</strong> 기록할 수 있다. 다른 리스트가 같은 할당자로 기록 중이면 Reset 에러.</li>
+		<li>할당자 Reset은 GPU 완료 후. 업로드 경우 <code>WaitForGpu</code>가 이걸 보장한다.</li>
+	</ul>
+</div>
+<p>업로드 흐름에 대입하면 <code>Close → Execute → WaitForGpu → (첫 BeginFrame) 할당자 Reset → 리스트 Reset</code>이 되어 위 조건을 모두 만족한다. 참고로 <code>CreateCommandList</code>는 리스트를 <strong>열린 상태</strong>로 만들기 때문에 <code>GraphicsDevice.cpp:76</code>에서 바로 Close하는 것이고, 처음부터 닫힌 상태로 만드는 <code>ID3D12Device4::CreateCommandList1</code>도 있다.</p>
+
 <div class="callout key">
 	<span class="label">결론</span>
 	둘 다 맞는 방법이다. 지금처럼 시작할 때 큐브 하나만 올린다면 Close를 지우는 쪽이 제일 짧다. "열기 → 기록 → 닫기 + 실행 + 대기"라는 짝을 함수로 보이게 하고 나중에도 쓰려면 <code>BeginUpload</code> / <code>EndUpload</code>가 낫다. 어느 쪽이든 2~4번(DEFAULT 버퍼, 배리어, 펜스 대기 후 임시 버퍼 해제)은 똑같다.
