@@ -829,6 +829,32 @@ index 29894c5..b3088fc 100644
 	<li>처음 만든 경우에는 Close와 Reset을 둘 다 건너뛰고, 열린 채로 나온 리스트에 바로 기록한다. 동작은 같지만 "처음이면 이렇게, 아니면 저렇게"로 경로가 둘이 된다.</li>
 	<li><code>ID3D12Device4::CreateCommandList1</code>은 리스트를 <strong>닫힌 상태</strong>로 만들어 주므로 이 Close가 아예 필요 없다. 지금 코드는 <code>ID3D12Device</code>만 쓰고 있어서 <code>CreateCommandList</code> + Close로 맞췄다.</li>
 </ul>
+
+<h4>각 호출은 어느 객체의 메서드인가</h4>
+<p class="qa">이거 각기 어떤 객체에서 호출된건지 알려줘 (위 표: 호출 / 리스트 상태)</p>
+<p>등장하는 D3D12 객체는 <strong>디바이스, 할당자, 커맨드 리스트, 큐, 펜스, 리소스</strong> 여섯 종류다. 줄 번호는 <code>Uploader.cpp</code> 기준이다.</p>
+<div class="table-wrap"><table>
+	<tr><th>단계</th><th>호출</th><th>객체 (인터페이스)</th><th>위치</th></tr>
+	<tr><td rowspan="3">첫 <code>Begin</code><br>(생성)</td><td><code>CreateCommandAllocator</code></td><td><code>device</code> = <code>gfx.Device()</code> (<code>ID3D12Device</code>)</td><td>47</td></tr>
+	<tr><td><code>CreateCommandList</code></td><td><code>device</code> (<code>ID3D12Device</code>)</td><td>49</td></tr>
+	<tr><td><code>Close</code></td><td><code>m_commandList</code> (<code>ID3D12GraphicsCommandList</code>)</td><td>51</td></tr>
+	<tr><td rowspan="2"><code>Begin</code><br>(매번)</td><td><code>Reset()</code></td><td><code>m_commandAllocator</code> (<code>ID3D12CommandAllocator</code>)</td><td>55</td></tr>
+	<tr><td><code>Reset(할당자, nullptr)</code></td><td><code>m_commandList</code> (<code>ID3D12GraphicsCommandList</code>)</td><td>56</td></tr>
+	<tr><td rowspan="5"><code>CreateDefaultBuffer</code><br>(<code>Uploader</code>의 메서드)</td><td><code>CreateCommittedResource</code> ×2 (<code>CreateBuffer</code> 헬퍼 안)</td><td><code>device</code> (<code>ID3D12Device</code>)</td><td>28 (65, 69에서 호출)</td></tr>
+	<tr><td><code>Map</code> / <code>Unmap</code></td><td><code>uploadBuffer</code> (<code>ID3D12Resource</code>)</td><td>74, 76</td></tr>
+	<tr><td><code>ResourceBarrier</code> (COMMON→COPY_DEST)</td><td><code>m_commandList</code></td><td>82</td></tr>
+	<tr><td><code>CopyBufferRegion</code></td><td><code>m_commandList</code></td><td>85</td></tr>
+	<tr><td><code>ResourceBarrier</code> (COPY_DEST→final)</td><td><code>m_commandList</code></td><td>90</td></tr>
+	<tr><td rowspan="4"><code>End</code></td><td><code>Close</code></td><td><code>m_commandList</code></td><td>101</td></tr>
+	<tr><td><code>ExecuteCommandLists</code></td><td><code>m_gfx-&gt;CommandQueue()</code> (<code>ID3D12CommandQueue</code>)</td><td>105</td></tr>
+	<tr><td><code>WaitForGpu</code></td><td><code>m_gfx</code> (<code>GraphicsDevice</code>, 직접 만든 클래스). 안에서 <code>m_commandQueue-&gt;Signal</code>(큐), <code>m_fence-&gt;GetCompletedValue</code> / <code>SetEventOnCompletion</code>(<code>ID3D12Fence</code>), <code>WaitForSingleObject</code>(Win32)</td><td>108 → <code>GraphicsDevice.cpp:199-208</code></td></tr>
+	<tr><td><code>clear()</code></td><td><code>m_pendingUploads</code> (<code>std::vector</code>). 각 <code>ComPtr</code>이 Release되어 임시 버퍼 해제</td><td>111</td></tr>
+</table></div>
+<p>정리하면 <strong>만드는 건 디바이스, 명령을 적는 건 커맨드 리스트, 그 메모리는 할당자, 제출은 큐, 완료 확인은 펜스</strong>다. 리스트 상태(열림/닫힘)를 바꾸는 건 <code>m_commandList</code>의 <code>Close</code>와 <code>Reset</code> 두 메서드뿐이다.</p>
+<div class="callout warn">
+	<span class="label"><code>.Reset()</code>과 <code>-&gt;Reset()</code>은 다르다</span>
+	<code>m_commandList-&gt;Reset(...)</code>(56줄)은 D3D12의 "리스트 다시 열기"다. <code>Shutdown</code>의 <code>m_commandList.Reset()</code>(117줄)은 화살표가 아니라 점이고, <code>ComPtr</code>의 "참조 놓기(Release)"다. 이름만 같고 전혀 다른 함수다. 할당자도 마찬가지로 <code>m_commandAllocator-&gt;Reset()</code>(55줄)은 메모리 비우기, <code>m_commandAllocator.Reset()</code>(118줄)은 객체 해제다.
+</div>
 </section>
 
 <!--CHAPTERS-END: 새 장(section)은 이 줄 바로 위에 추가 (형식은 tools/build_note.py 참고)-->
