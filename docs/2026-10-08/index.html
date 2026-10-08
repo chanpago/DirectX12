@@ -806,6 +806,29 @@ index 29894c5..b3088fc 100644
 	</ul>
 	VS 디버거(F5)로 실행해야 출력 창에서 메시지를 볼 수 있다.
 </div>
+
+<h3>Begin 안의 Close는 왜 있나</h3>
+<p class="qa">begin에서 close를 왜하는거야? close는 uploader.End();에서 하는거 아닌가?</p>
+<p>기록을 끝내는 Close는 <code>End</code>에서 하는 게 맞다. <code>Begin</code>의 Close는 그것과 다른 목적으로, <strong>처음 만들 때 한 번만</strong> 실행된다(<code>if (!m_commandAllocator)</code> 블록 안).</p>
+<ul>
+	<li><code>CreateCommandList</code>는 리스트를 <strong>열린 상태</strong>로 만든다.</li>
+	<li>그런데 바로 아래 줄에서 매번 <code>m_commandList->Reset</code>을 부른다. Reset은 <strong>닫힌 리스트에만</strong> 할 수 있다(1장 "같은 리스트를 Close하고 다시 Reset해도 되나").</li>
+	<li>그래서 처음 만든 직후에 한 번 닫아서 "닫힌 상태"로 맞춰 두면, 첫 <code>Begin</code>이든 두 번째 <code>Begin</code>이든 똑같이 "할당자 Reset → 리스트 Reset"으로 열 수 있다.</li>
+</ul>
+<div class="table-wrap"><table>
+	<tr><th>호출</th><th>리스트 상태</th></tr>
+	<tr><td>첫 <code>Begin</code>: <code>CreateCommandList</code></td><td>열림</td></tr>
+	<tr><td>첫 <code>Begin</code>: <code>Close</code> (생성 직후 한 번)</td><td>닫힘</td></tr>
+	<tr><td><code>Begin</code>: <code>Reset</code></td><td>열림 (기록 시작)</td></tr>
+	<tr><td><code>CreateDefaultBuffer</code> × N</td><td>열림 (기록)</td></tr>
+	<tr><td><code>End</code>: <code>Close</code> → Execute → 대기</td><td>닫힘</td></tr>
+	<tr><td>다음 <code>Begin</code>: <code>Reset</code> (생성·Close는 건너뜀)</td><td>열림</td></tr>
+</table></div>
+<p><code>GraphicsDevice.cpp:74-76</code>이 리스트를 만들자마자 Close하는 것과 같은 패턴이다. 다른 방법도 있다.</p>
+<ul>
+	<li>처음 만든 경우에는 Close와 Reset을 둘 다 건너뛰고, 열린 채로 나온 리스트에 바로 기록한다. 동작은 같지만 "처음이면 이렇게, 아니면 저렇게"로 경로가 둘이 된다.</li>
+	<li><code>ID3D12Device4::CreateCommandList1</code>은 리스트를 <strong>닫힌 상태</strong>로 만들어 주므로 이 Close가 아예 필요 없다. 지금 코드는 <code>ID3D12Device</code>만 쓰고 있어서 <code>CreateCommandList</code> + Close로 맞췄다.</li>
+</ul>
 </section>
 
 <!--CHAPTERS-END: 새 장(section)은 이 줄 바로 위에 추가 (형식은 tools/build_note.py 참고)-->
