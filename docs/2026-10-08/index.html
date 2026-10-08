@@ -880,6 +880,23 @@ else
 	매 프레임 <code>BeginFrame</code>이 렌더 타깃, 뷰포트, 시저를 다시 설정하고(<code>GraphicsDevice.cpp:274-278</code>), main이 루트 시그니처와 PSO, 토폴로지를 다시 거는(<code>main.cpp:199-203</code>) 이유가 이것이다. 리스트를 Reset하면 지난 프레임에 걸어 둔 바인딩이 남아 있지 않다. DX11처럼 "한 번 설정하면 계속 유지"되는 상태가 없다.
 </div>
 
+<h4>Mesh::Init 동안 무슨 일이 "지금" 일어나고 무엇이 "나중"인가</h4>
+<p class="qa">void Mesh::Init(Uploader&amp; uploader) 여기서 지금 업로드 버퍼에 기록을 map으로 열어서 하고 나서 디폴트 힙에 복사를 한다는거지? 이 동안은 아까 커맨드리스트에서 계속 reset으로 열려있는거고</p>
+<p>맞다. 리스트는 <code>Begin</code>의 Reset부터 <code>End</code>의 Close까지 계속 열려 있고, <code>Mesh::Init</code>은 그 사이에 실행된다. 한 가지만 구분하면: <code>Mesh::Init</code> 안에서 <strong>Map + memcpy는 그 자리에서 실제로 일어나고</strong>, <strong>DEFAULT로의 복사는 적어 두기만</strong> 한다. 실제 복사는 <code>End</code>의 Execute 이후에 GPU가 한다.</p>
+<div class="table-wrap"><table>
+	<tr><th>순서</th><th>호출</th><th>언제 실제로 일어나나</th><th>리스트</th></tr>
+	<tr><td>1</td><td><code>uploader.Begin</code>: 할당자 Reset, 리스트 Reset</td><td>즉시</td><td>열림</td></tr>
+	<tr><td>2</td><td><code>CreateCommittedResource</code> (DEFAULT, UPLOAD)</td><td><strong>즉시</strong> (디바이스, CPU)</td><td>열림 (안 씀)</td></tr>
+	<tr><td>3</td><td><code>Map</code> → <code>memcpy</code> → <code>Unmap</code></td><td><strong>즉시</strong>. CPU가 UPLOAD 메모리에 직접 씀. 리스트와 무관</td><td>열림 (안 씀)</td></tr>
+	<tr><td>4</td><td><code>ResourceBarrier</code>, <code>CopyBufferRegion</code>, <code>ResourceBarrier</code></td><td><strong>기록만</strong>. 할당자 메모리에 "이렇게 해라"가 적힘</td><td>열림 (기록)</td></tr>
+	<tr><td>5</td><td>VBV/IBV 채우기</td><td>즉시 (구조체 대입). 주소는 이미 정해져 있으므로 복사 전이어도 됨</td><td>열림</td></tr>
+	<tr><td colspan="4">── IB에 대해 2~4 반복 ── 여기까지가 <code>Mesh::Init</code> ──</td></tr>
+	<tr><td>6</td><td><code>uploader.End</code>: Close</td><td>즉시</td><td>닫힘</td></tr>
+	<tr><td>7</td><td><code>ExecuteCommandLists</code></td><td>제출 즉시 반환. <strong>이제야 GPU가 4번을 실행</strong> (배리어 → 복사 → 배리어)</td><td>닫힘</td></tr>
+	<tr><td>8</td><td><code>WaitForGpu</code> → <code>clear()</code></td><td>GPU 복사 완료까지 CPU 대기 후 임시 버퍼 해제</td><td>닫힘</td></tr>
+</table></div>
+<p>그래서 <code>Mesh::Init</code>이 끝난 시점에는 UPLOAD 버퍼에는 정점이 들어 있지만 DEFAULT 버퍼는 아직 비어 있다. 5번에서 VBV가 이미 DEFAULT 버퍼 주소를 가리키는 건 괜찮다. 주소는 생성 때 정해지고, 실제로 읽히는 건 루프의 첫 Draw이며 그때는 8번까지 끝나 있다.</p>
+
 <h4>각 호출은 어느 객체의 메서드인가</h4>
 <p class="qa">이거 각기 어떤 객체에서 호출된건지 알려줘 (위 표: 호출 / 리스트 상태)</p>
 <p>등장하는 D3D12 객체는 <strong>디바이스, 할당자, 커맨드 리스트, 큐, 펜스, 리소스</strong> 여섯 종류다. 줄 번호는 <code>Uploader.cpp</code> 기준이다.</p>
